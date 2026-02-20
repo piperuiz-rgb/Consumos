@@ -11,75 +11,89 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-/* ── Reference card (gray) ── */
+/* ── Reference card ── */
 .ref-card {
-    background: #e4e4e4;
-    border-left: 4px solid #999;
+    background: #e8e8e8;
+    border-left: 4px solid #888;
     border-radius: 0 6px 6px 0;
     padding: 7px 14px;
-    margin: 16px 0 4px 0;
+    margin: 18px 0 2px 0;
 }
-.ref-title { font-size: 0.92em; font-weight: 700; color: #333; }
+.ref-title { font-size: 0.9em; font-weight: 700; color: #2c2c2c; }
 
-/* ── Color column header ── */
+/* ── Column/row headers ── */
 .col-hdr {
-    background: #f4f4f4;
-    border: 1px solid #d8d8d8;
+    background: #f0f0f0;
+    border: 1px solid #d0d0d0;
     border-radius: 4px;
     text-align: center;
-    padding: 3px 4px;
+    padding: 3px 6px;
     font-size: 0.78em;
     font-weight: 600;
     color: #555;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+}
+.col-hdr-tot {
+    background: #e0e0e0;
+    border: 1px solid #b8b8b8;
+    border-radius: 4px;
+    text-align: center;
+    padding: 3px 6px;
+    font-size: 0.78em;
+    font-weight: 700;
+    color: #333;
+}
+.sz-lbl {
+    text-align: right;
+    font-weight: 600;
+    font-size: 0.82em;
+    color: #444;
+    padding: 10px 8px 0 0;
 }
 
-/* ── Size label ── */
-.sz-lbl {
+/* ── Totals ── */
+.tot-val {
+    text-align: center;
+    font-weight: 700;
+    font-size: 0.9em;
+    color: #333;
+    padding-top: 8px;
+}
+.tot-lbl {
     text-align: right;
     font-weight: 700;
     font-size: 0.82em;
-    color: #444;
+    color: #333;
     padding: 8px 8px 0 0;
+    border-top: 1px solid #ccc;
 }
-
-/* ── Quantity display ── */
-.qty-val {
+.tot-zero {
     text-align: center;
-    font-size: 1em;
-    font-weight: 700;
-    color: #111;
-    padding-top: 6px;
+    color: #ccc;
+    font-size: 0.85em;
+    padding-top: 8px;
 }
-.qty-zero { color: #ccc; }
+.grand-tot {
+    text-align: center;
+    font-weight: 700;
+    font-size: 1em;
+    color: #111;
+    padding-top: 8px;
+    border-top: 1px solid #bbb;
+}
 
-/* ── Compact +/- buttons ── */
+/* ── Number inputs: compact & centered ── */
+div[data-testid="stNumberInput"] {
+    margin-bottom: 0 !important;
+}
+div[data-testid="stNumberInput"] input {
+    text-align: center !important;
+    font-weight: 600 !important;
+    font-size: 0.9em !important;
+}
+
+/* ── No min-width on columns ── */
 div[data-testid="stHorizontalBlock"] > div {
     min-width: 0 !important;
-}
-
-/* ── Fix button label visibility in narrow columns ── */
-div[data-testid="stButton"] > button {
-    padding-left: 4px !important;
-    padding-right: 4px !important;
-    overflow: visible !important;
-}
-div[data-testid="stButton"] > button > div > p {
-    font-size: 1em !important;
-    font-weight: 700 !important;
-    overflow: visible !important;
-    white-space: nowrap !important;
-}
-
-/* ── Bulk section card ── */
-.bulk-card {
-    background: #f0f4f8;
-    border: 1px solid #c8d6e5;
-    border-radius: 8px;
-    padding: 10px 14px 14px 14px;
-    margin-bottom: 12px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -101,25 +115,18 @@ def load_data():
     variantes["Código de barras principal"] = (
         variantes["Código de barras principal"].astype(str).str.strip()
     )
-    variantes["Color"] = (
-        variantes["Color"].str.replace("Color: ", "", regex=False).str.strip()
-    )
-    variantes["Talla"] = (
-        variantes["Talla"].str.replace("Talla: ", "", regex=False).str.strip()
-    )
+    variantes["Color"] = variantes["Color"].str.replace("Color: ", "", regex=False).str.strip()
+    variantes["Talla"] = variantes["Talla"].str.replace("Talla: ", "", regex=False).str.strip()
 
     barcode_lookup = variantes.set_index("Código de barras principal").to_dict("index")
     bom_barcodes = set(bom["Cod Barras Variante"].unique())
-    finished = variantes[
-        variantes["Código de barras principal"].isin(bom_barcodes)
-    ].copy()
+    finished = variantes[variantes["Código de barras principal"].isin(bom_barcodes)].copy()
 
     return variantes, bom, barcode_lookup, finished
 
 
 variantes, bom, barcode_lookup, finished = load_data()
 
-# ── Size sort order ──────────────────────────────────────────────────────────
 _SZ = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "2XL", "XXXL", "3XL", "4XL"]
 
 
@@ -136,8 +143,8 @@ def _sz_key(s):
 # ── SECTION 1 — Filters ──────────────────────────────────────────────────────
 st.header("1. Plan de producción")
 st.markdown(
-    "Filtra las referencias que quieres fabricar e introduce la cantidad "
-    "usando los botones **+** / **−**. Pulsa **Calcular Consumos** cuando termines."
+    "Filtra las referencias e introduce las unidades a fabricar. "
+    "Usa la **asignación masiva** para rellenar rangos completos de talla o color."
 )
 
 col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
@@ -170,22 +177,14 @@ if sel_ref != "Todas":
 
 st.caption(f"{len(df)} variantes mostradas")
 
+
 # ── Bulk assignment ───────────────────────────────────────────────────────────
-def _bulk_apply(target_df, tallas_sel, colors_sel, delta):
+def _bulk_apply(target_df, delta):
     """delta=int → add/subtract; delta=None → reset to 0."""
-    sub = target_df.copy()
-    if tallas_sel:
-        sub = sub[sub["Talla"].isin(tallas_sel)]
-    if colors_sel:
-        sub = sub[sub["Color"].isin(colors_sel)]
-    for bc in sub["Código de barras principal"]:
+    for bc in target_df["Código de barras principal"]:
         sk = f"qty_{bc}"
-        if sk not in st.session_state:
-            st.session_state[sk] = 0
-        if delta is None:
-            st.session_state[sk] = 0
-        else:
-            st.session_state[sk] = max(0, st.session_state[sk] + delta)
+        cur = st.session_state.get(sk, 0)
+        st.session_state[sk] = 0 if delta is None else max(0, cur + delta)
 
 
 with st.expander("Asignación masiva por talla / color", expanded=False):
@@ -203,7 +202,6 @@ with st.expander("Asignación masiva por talla / color", expanded=False):
             placeholder="Todos los colores visibles",
         )
 
-    # Count affected variants
     sub_bulk = df.copy()
     if bulk_tallas:
         sub_bulk = sub_bulk[sub_bulk["Talla"].isin(bulk_tallas)]
@@ -211,32 +209,36 @@ with st.expander("Asignación masiva por talla / color", expanded=False):
         sub_bulk = sub_bulk[sub_bulk["Color"].isin(bulk_colors)]
     st.caption(f"Afecta a **{len(sub_bulk)}** de {len(df)} variantes visibles")
 
-    # Action buttons: remove | neutral | add | reset
-    bc1, bc2, bc3, _sp, bc4, bc5, bc6, _sp2, bc7 = st.columns(
+    bc1, bc2, bc3, _s, bc4, bc5, bc6, _s2, bc7 = st.columns(
         [1, 1, 1, 0.3, 1, 1, 1, 0.3, 1.4]
     )
     if bc1.button("− 10", use_container_width=True):
-        _bulk_apply(sub_bulk, [], [], -10)
+        _bulk_apply(sub_bulk, -10)
     if bc2.button("− 5", use_container_width=True):
-        _bulk_apply(sub_bulk, [], [], -5)
+        _bulk_apply(sub_bulk, -5)
     if bc3.button("− 1", use_container_width=True):
-        _bulk_apply(sub_bulk, [], [], -1)
+        _bulk_apply(sub_bulk, -1)
     if bc4.button("+ 1", use_container_width=True):
-        _bulk_apply(sub_bulk, [], [], 1)
+        _bulk_apply(sub_bulk, 1)
     if bc5.button("+ 5", use_container_width=True):
-        _bulk_apply(sub_bulk, [], [], 5)
+        _bulk_apply(sub_bulk, 5)
     if bc6.button("+ 10", use_container_width=True):
-        _bulk_apply(sub_bulk, [], [], 10)
+        _bulk_apply(sub_bulk, 10)
     if bc7.button("Poner a 0", use_container_width=True):
-        _bulk_apply(sub_bulk, [], [], None)
+        _bulk_apply(sub_bulk, None)
 
-# Placeholder for the summary info — filled after all buttons are processed
+# Placeholder filled after matrix so totals reflect current state
 summary_slot = st.empty()
 
 # ── Matrix view ──────────────────────────────────────────────────────────────
 for (ref, nombre), grp in df.groupby(["Referencia interna", "Nombre"], sort=True):
     colors = sorted(grp["Color"].dropna().unique().tolist())
     tallas = sorted(grp["Talla"].dropna().unique().tolist(), key=_sz_key)
+
+    bc_map = {
+        (r["Color"], r["Talla"]): r["Código de barras principal"]
+        for _, r in grp.iterrows()
+    }
 
     # Gray reference card
     st.markdown(
@@ -246,57 +248,70 @@ for (ref, nombre), grp in df.groupby(["Referencia interna", "Nombre"], sort=True
         unsafe_allow_html=True,
     )
 
-    ratios = [0.7] + [2.0] * len(colors)
+    # ratios: [talla label] + [one per color] + [total col]
+    ratios = [0.8] + [2.5] * len(colors) + [1.0]
 
-    # Header row: color names
+    # Header row
     hcols = st.columns(ratios)
     hcols[0].write("")
     for ci, color in enumerate(colors):
         hcols[ci + 1].markdown(
             f'<div class="col-hdr">{color}</div>', unsafe_allow_html=True
         )
+    hcols[-1].markdown('<div class="col-hdr-tot">Total</div>', unsafe_allow_html=True)
+
+    col_totals = [0] * len(colors)
 
     # One row per size
     for talla in tallas:
         rcols = st.columns(ratios)
-        rcols[0].markdown(
-            f'<div class="sz-lbl">{talla}</div>', unsafe_allow_html=True
-        )
+        rcols[0].markdown(f'<div class="sz-lbl">{talla}</div>', unsafe_allow_html=True)
+        row_total = 0
 
         for ci, color in enumerate(colors):
-            match = grp[(grp["Color"] == color) & (grp["Talla"] == talla)]
-            if match.empty:
-                rcols[ci + 1].markdown(
-                    '<div style="min-height:34px"></div>', unsafe_allow_html=True
-                )
+            bc = bc_map.get((color, talla))
+            if bc is None:
                 continue
-
-            bc = match.iloc[0]["Código de barras principal"]
             sk = f"qty_{bc}"
             if sk not in st.session_state:
                 st.session_state[sk] = 0
-
             with rcols[ci + 1]:
-                b0, b1, b2 = st.columns([1, 1, 1])
+                v = st.number_input(
+                    talla,
+                    min_value=0,
+                    step=1,
+                    key=sk,
+                    label_visibility="collapsed",
+                )
+            row_total += int(v)
+            col_totals[ci] += int(v)
 
-                # Render both buttons first, then process clicks, then display
-                minus = b0.button("−", key=f"m_{bc}", use_container_width=True)
-                plus = b2.button(" + ", key=f"p_{bc}", use_container_width=True)
+        cls = "tot-val" if row_total > 0 else "tot-zero"
+        rcols[-1].markdown(
+            f'<div class="{cls}">{row_total if row_total > 0 else "—"}</div>',
+            unsafe_allow_html=True,
+        )
 
-                if minus:
-                    st.session_state[sk] = max(0, st.session_state[sk] - 1)
-                if plus:
-                    st.session_state[sk] += 1
+    # Totals row
+    tcols = st.columns(ratios)
+    tcols[0].markdown('<div class="tot-lbl">Total</div>', unsafe_allow_html=True)
+    grand = sum(col_totals)
+    for ci, ct in enumerate(col_totals):
+        cls = "tot-val" if ct > 0 else "tot-zero"
+        tcols[ci + 1].markdown(
+            f'<div class="{cls}">{ct if ct > 0 else "—"}</div>',
+            unsafe_allow_html=True,
+        )
+    tcols[-1].markdown(
+        f'<div class="grand-tot">{grand if grand > 0 else "—"}</div>',
+        unsafe_allow_html=True,
+    )
 
-                v = st.session_state[sk]
-                cls = "qty-val" if v > 0 else "qty-val qty-zero"
-                b1.markdown(f'<div class="{cls}">{v}</div>', unsafe_allow_html=True)
-
-# After all buttons are processed, update the summary with fresh totals
+# Fill summary after all inputs are rendered (values are now current)
 fresh_qtys = {
-    k[4:]: v
+    k[4:]: int(v)
     for k, v in st.session_state.items()
-    if k.startswith("qty_") and isinstance(v, int) and v > 0
+    if k.startswith("qty_") and isinstance(v, (int, float)) and v > 0
 }
 if fresh_qtys:
     summary_slot.info(
@@ -309,22 +324,20 @@ st.divider()
 # ── SECTION 2 — Calculate ────────────────────────────────────────────────────
 if st.button("Calcular Consumos", type="primary", use_container_width=True):
     final_qtys = {
-        k[4:]: v
+        k[4:]: int(v)
         for k, v in st.session_state.items()
-        if k.startswith("qty_") and isinstance(v, int) and v > 0
+        if k.startswith("qty_") and isinstance(v, (int, float)) and v > 0
     }
     if not final_qtys:
         st.warning("Introduce la cantidad a producir en al menos una variante.")
         st.stop()
 
-    # Aggregate component requirements
     comp_totals: dict[str, float] = {}
     for bc, qty in final_qtys.items():
         for _, brow in bom[bom["Cod Barras Variante"] == bc].iterrows():
             comp = str(brow["EAN Componente"])
             comp_totals[comp] = comp_totals.get(comp, 0.0) + float(brow["Cantidad"]) * qty
 
-    # Resolve component details
     results = []
     for comp_bc, total_qty in comp_totals.items():
         info = barcode_lookup.get(comp_bc, {})
@@ -341,9 +354,9 @@ if st.button("Calcular Consumos", type="primary", use_container_width=True):
             }
         )
 
-    results_df = pd.DataFrame(results).sort_values(
-        ["Nombre", "Color", "Talla"]
-    ).reset_index(drop=True)
+    results_df = (
+        pd.DataFrame(results).sort_values(["Nombre", "Color", "Talla"]).reset_index(drop=True)
+    )
 
     st.header("2. Necesidades de componentes")
     st.caption(f"{len(results_df)} componentes distintos necesarios para fabricar la colección")
