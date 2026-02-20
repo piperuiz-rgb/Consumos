@@ -59,6 +59,28 @@ st.markdown("""
 div[data-testid="stHorizontalBlock"] > div {
     min-width: 0 !important;
 }
+
+/* ── Fix button label visibility in narrow columns ── */
+div[data-testid="stButton"] > button {
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+    overflow: visible !important;
+}
+div[data-testid="stButton"] > button > div > p {
+    font-size: 1em !important;
+    font-weight: 700 !important;
+    overflow: visible !important;
+    white-space: nowrap !important;
+}
+
+/* ── Bulk section card ── */
+.bulk-card {
+    background: #f0f4f8;
+    border: 1px solid #c8d6e5;
+    border-radius: 8px;
+    padding: 10px 14px 14px 14px;
+    margin-bottom: 12px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -148,6 +170,66 @@ if sel_ref != "Todas":
 
 st.caption(f"{len(df)} variantes mostradas")
 
+# ── Bulk assignment ───────────────────────────────────────────────────────────
+def _bulk_apply(target_df, tallas_sel, colors_sel, delta):
+    """delta=int → add/subtract; delta=None → reset to 0."""
+    sub = target_df.copy()
+    if tallas_sel:
+        sub = sub[sub["Talla"].isin(tallas_sel)]
+    if colors_sel:
+        sub = sub[sub["Color"].isin(colors_sel)]
+    for bc in sub["Código de barras principal"]:
+        sk = f"qty_{bc}"
+        if sk not in st.session_state:
+            st.session_state[sk] = 0
+        if delta is None:
+            st.session_state[sk] = 0
+        else:
+            st.session_state[sk] = max(0, st.session_state[sk] + delta)
+
+
+with st.expander("Asignación masiva por talla / color", expanded=False):
+    mc1, mc2 = st.columns(2)
+    with mc1:
+        bulk_tallas = st.multiselect(
+            "Filtrar por talla",
+            sorted(df["Talla"].dropna().unique().tolist(), key=_sz_key),
+            placeholder="Todas las tallas visibles",
+        )
+    with mc2:
+        bulk_colors = st.multiselect(
+            "Filtrar por color",
+            sorted(df["Color"].dropna().unique().tolist()),
+            placeholder="Todos los colores visibles",
+        )
+
+    # Count affected variants
+    sub_bulk = df.copy()
+    if bulk_tallas:
+        sub_bulk = sub_bulk[sub_bulk["Talla"].isin(bulk_tallas)]
+    if bulk_colors:
+        sub_bulk = sub_bulk[sub_bulk["Color"].isin(bulk_colors)]
+    st.caption(f"Afecta a **{len(sub_bulk)}** de {len(df)} variantes visibles")
+
+    # Action buttons: remove | neutral | add | reset
+    bc1, bc2, bc3, _sp, bc4, bc5, bc6, _sp2, bc7 = st.columns(
+        [1, 1, 1, 0.3, 1, 1, 1, 0.3, 1.4]
+    )
+    if bc1.button("− 10", use_container_width=True):
+        _bulk_apply(sub_bulk, [], [], -10)
+    if bc2.button("− 5", use_container_width=True):
+        _bulk_apply(sub_bulk, [], [], -5)
+    if bc3.button("− 1", use_container_width=True):
+        _bulk_apply(sub_bulk, [], [], -1)
+    if bc4.button("+ 1", use_container_width=True):
+        _bulk_apply(sub_bulk, [], [], 1)
+    if bc5.button("+ 5", use_container_width=True):
+        _bulk_apply(sub_bulk, [], [], 5)
+    if bc6.button("+ 10", use_container_width=True):
+        _bulk_apply(sub_bulk, [], [], 10)
+    if bc7.button("Poner a 0", use_container_width=True):
+        _bulk_apply(sub_bulk, [], [], None)
+
 # Placeholder for the summary info — filled after all buttons are processed
 summary_slot = st.empty()
 
@@ -199,7 +281,7 @@ for (ref, nombre), grp in df.groupby(["Referencia interna", "Nombre"], sort=True
 
                 # Render both buttons first, then process clicks, then display
                 minus = b0.button("−", key=f"m_{bc}", use_container_width=True)
-                plus = b2.button("+", key=f"p_{bc}", use_container_width=True)
+                plus = b2.button(" + ", key=f"p_{bc}", use_container_width=True)
 
                 if minus:
                     st.session_state[sk] = max(0, st.session_state[sk] - 1)
