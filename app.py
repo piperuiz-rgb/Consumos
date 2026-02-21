@@ -1249,12 +1249,22 @@ with tab2:
         draft_df = pd.DataFrame(st.session_state["bom_draft"])
         draft_df["_idx"] = range(len(draft_df))
 
-        _bom_q = st.text_input(
-            "Buscar en la BOM",
-            placeholder="Nombre de variante o componente…",
-            key="bom_table_q",
-            label_visibility="collapsed",
-        )
+        # ── Controls row ─────────────────────────────────────────────────────
+        _bom_ctrl_q, _bom_ctrl_exp, _bom_ctrl_col = st.columns([5, 1.3, 1.3])
+        with _bom_ctrl_q:
+            _bom_q = st.text_input(
+                "Buscar en la BOM",
+                placeholder="Nombre de variante o componente…",
+                key="bom_table_q",
+                label_visibility="collapsed",
+            )
+        if _bom_ctrl_exp.button("Expandir todo", use_container_width=True, key="bom_expand_all"):
+            st.session_state["bom_all_expanded"] = True
+            st.rerun()
+        if _bom_ctrl_col.button("Contraer todo", use_container_width=True, key="bom_collapse_all"):
+            st.session_state["bom_all_expanded"] = False
+            st.rerun()
+
         if _bom_q:
             _mask = (
                 draft_df["_nombre_variante"].str.contains(_bom_q, case=False, na=False)
@@ -1262,32 +1272,31 @@ with tab2:
             )
             draft_df = draft_df[_mask]
 
+        _all_exp = st.session_state.get("bom_all_expanded", True)
         to_delete = None
 
         for bc_var, group in draft_df.groupby("Cod Barras Variante", sort=False):
             var_name = group.iloc[0]["_nombre_variante"]
-            st.markdown(
-                f'<div class="ref-card"><span class="ref-title">{var_name}</span></div>',
-                unsafe_allow_html=True,
-            )
-
-            for _, row in group.iterrows():
-                idx = int(row["_idx"])
-                rc1, rc2, rc3, rc4 = st.columns([4, 2.5, 1.5, 0.6])
-                rc1.write(row["_nombre_componente"])
-                rc2.caption(f"EAN: {row['EAN Componente']}")
-                _bom_qty_key = f"bom_qty_{row['Cod Barras Variante']}_{row['EAN Componente']}"
-                rc3.number_input(
-                    "Cantidad",
-                    min_value=0.001,
-                    step=0.1,
-                    value=float(row["Cantidad"]),
-                    key=_bom_qty_key,
-                    label_visibility="collapsed",
-                    format="%.3f",
-                )
-                if rc4.button("X", key=f"del_bom_{idx}", help="Eliminar esta entrada"):
-                    to_delete = idx
+            n_comp = len(group)
+            label = f"{var_name}  ·  {n_comp} componente{'s' if n_comp != 1 else ''}"
+            with st.expander(label, expanded=_all_exp):
+                for _, row in group.iterrows():
+                    idx = int(row["_idx"])
+                    rc1, rc2, rc3, rc4 = st.columns([4, 2.5, 1.5, 0.6])
+                    rc1.write(row["_nombre_componente"])
+                    rc2.caption(f"EAN: {row['EAN Componente']}")
+                    _bom_qty_key = f"bom_qty_{row['Cod Barras Variante']}_{row['EAN Componente']}"
+                    rc3.number_input(
+                        "Cantidad",
+                        min_value=0.001,
+                        step=0.1,
+                        value=float(row["Cantidad"]),
+                        key=_bom_qty_key,
+                        label_visibility="collapsed",
+                        format="%.3f",
+                    )
+                    if rc4.button("X", key=f"del_bom_{idx}", help="Eliminar esta entrada"):
+                        to_delete = idx
 
         # Sync edited quantities back to bom_draft
         for _entry in st.session_state["bom_draft"]:
