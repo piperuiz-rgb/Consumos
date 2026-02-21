@@ -6,6 +6,7 @@ import os
 import json
 from pathlib import Path
 from groq import Groq
+import pdfplumber
 
 # File used to persist the BOM draft across browser sessions
 BOM_SESSION_FILE = Path(__file__).parent / "bom_session.json"
@@ -1540,6 +1541,200 @@ with tab2:
                     parts.append(f"{skipped} omitidas (ya existían)")
                 st.success(f"Asignación completada: {', '.join(parts)}.")
                 st.rerun()
+
+    # ── Import BOM from PDF technical sheet ───────────────────────────────────
+    with st.expander("Importar BOM desde ficha técnica (IA)", expanded=False):
+        st.markdown(
+            "Sube la ficha técnica en PDF de una prenda y la IA extraerá sus materiales "
+            "automáticamente. Selecciona primero las variantes a las que quieres aplicar la BOM resultante."
+        )
+
+        # Step 1 — select target variants
+        st.markdown("**1. Variantes a las que aplicar la BOM**")
+        pdf_sel_labels = st.multiselect(
+            "Variantes",
+            options=prenda_label_list,
+            placeholder="Selecciona una o más variantes…",
+            key="pdf_sel_prendas",
+            label_visibility="collapsed",
+        )
+
+        # Step 2 — upload PDF
+        st.markdown("**2. Sube la ficha técnica (PDF)**")
+        pdf_file = st.file_uploader(
+            "Ficha técnica PDF",
+            type=["pdf"],
+            key="pdf_upload",
+            label_visibility="collapsed",
+        )
+
+        if pdf_file and pdf_sel_labels:
+            if st.button(
+                "Analizar ficha técnica",
+                type="primary",
+                use_container_width=True,
+                key="pdf_analyze",
+            ):
+                # Extract text and tables from PDF
+                with st.spinner("Extrayendo contenido del PDF…"):
+                    try:
+                        _text_parts = []
+                        with pdfplumber.open(pdf_file) as _pdf:
+                            for _page in _pdf.pages:
+                                _t = _page.extract_text()
+                                if _t:
+                                    _text_parts.append(_t)
+                                for _tbl in (_page.extract_tables() or []):
+                                    for _row in _tbl:
+                                        if _row:
+                                            _text_parts.append(
+                                                " | ".join(str(c) for c in _row if c)
+                                            )
+                        _pdf_text = "\n".join(_text_parts)[:8000]
+                    except Exception as _pe:
+                        _pdf_text = ""
+                        st.error(f"Error al leer el PDF: {_pe}")
+
+                if _pdf_text:
+                    with st.spinner("La IA está analizando la ficha técnica…"):
+                        try:
+                            _pdf_groq = Groq(api_key=st.secrets["GROQ_API_KEY"])
+                            _pdf_resp = _pdf_groq.chat.completions.create(
+                                model="llama-3.1-8b-instant",
+                                messages=[
+                                    {
+                                        "role": "system",
+                                        "content": (
+                                            "Eres un experto en fichas técnicas de prendas de moda. "
+                                            "Tu tarea es extraer TODOS los materiales, tejidos, forros, "
+                                            "entretelas, accesorios y componentes mencionados, con sus "
+                                            "cantidades y unidades. "
+                                            'Devuelve ÚNICAMENTE un JSON con la clave "componentes", '
+                                            "un array de objetos con los campos: "
+                                            '"nombre" (string), "cantidad" (número), '
+                                            '"unidad" (string: m, ud, kg, cm, etc.). '
+                                            "Si no hay cantidad usa 1. Si no hay unidad usa 'ud'."
+                                        ),
+                                    },
+                                    {
+                                        "role": "user",
+                                        "content": f"Ficha técnica:\n\n{_pdf_text}",
+                                    },
+                                ],
+                                response_format={"type": "json_object"},
+                                max_tokens=1024,
+                                temperature=0,
+                            )
+                            _pdf_comps = json.loads(
+                                _pdf_resp.choices[0].message.content
+                            ).get("componentes", [])
+                        except Exception as _ae:
+                            _pdf_comps = []
+                            st.error(f"Error en el análisis IA: {_ae}")
+
+                    if _pdf_comps:
+                        # Match each extracted component against the catalog
+                        _pdf_results = []
+                        for _pc in _pdf_comps:
+                            _nombre   = str(_pc.get("nombre", "")).strip()
+                            _cantidad = float(_pc.get("cantidad", 1))
+                            _unidad   = str(_pc.get("unidad", "ud"))
+                            _cm = _match_comp(_nombre)
+                            if not _cm.empty:
+                                _cr = _cm.iloc[0]
+                                _comp_bc    = _cr["Código de barras principal"]
+                                _comp_label = (
+                                    f"{_cr['Referencia interna']} | {_cr['Nombre']} | "
+                                    f"{_cr['Color']} | {_cr['Talla']}"
+                                )
+                                _pdf_results.append({
+                                    "Extraído de la ficha":   _nombre,
+                                    "Cantidad": _cantidad,
+                                    "Unidad":   _unidad,
+                                    "Componente en catálogo": f"{_cr['Referencia interna']} | {_cr['Nombre']}",
+                                    "Estado":   "✓ Encontrado",
+                                    "_comp_bc":    _comp_bc,
+                                    "_comp_label": _comp_label,
+                                })
+                            else:
+                                _pdf_results.append({
+                                    "Extraído de la ficha":   _nombre,
+                                    "Cantidad": _cantidad,
+                                    "Unidad":   _unidad,
+                                    "Componente en catálogo": "— No encontrado en catálogo",
+                                    "Estado":   "⚠ Sin coincidencia",
+                                    "_comp_bc":    None,
+                                    "_comp_label": None,
+                                })
+                        st.session_state["pdf_analysis"] = {
+                            "prendas":    pdf_sel_labels,
+                            "resultados": _pdf_results,
+                        }
+                    else:
+                        st.warning("No se identificaron componentes en la ficha técnica.")
+                elif not _pdf_text:
+                    st.warning("No se pudo extraer texto del PDF. Comprueba que no esté protegido o sea solo imágenes.")
+
+        # Step 3 — review and confirm
+        _pa = st.session_state.get("pdf_analysis")
+        if _pa and _pa.get("prendas") == pdf_sel_labels:
+            _res = _pa["resultados"]
+            _matched   = [r for r in _res if r["_comp_bc"]]
+            _unmatched = [r for r in _res if not r["_comp_bc"]]
+
+            st.markdown("**3. Revisa los resultados y confirma**")
+            st.caption(
+                f"{len(_matched)} componentes encontrados en el catálogo"
+                + (f" — {len(_unmatched)} sin coincidencia" if _unmatched else "")
+            )
+            st.dataframe(
+                pd.DataFrame([
+                    {k: v for k, v in r.items() if not k.startswith("_")}
+                    for r in _res
+                ]),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            if _unmatched:
+                st.info(
+                    "Los componentes marcados como '⚠ Sin coincidencia' no se encontraron "
+                    "en el catálogo de variantes. Puedes añadirlos manualmente desde el formulario."
+                )
+
+            if _matched:
+                if st.button(
+                    f"Añadir {len(_matched)} componente(s) a la BOM de "
+                    f"{len(pdf_sel_labels)} variante(s)",
+                    type="primary",
+                    use_container_width=True,
+                    key="pdf_add_bom",
+                ):
+                    _added = 0
+                    for _plabel in _pa["prendas"]:
+                        _p_bc = prenda_label_to_bc.get(_plabel, "")
+                        if not _p_bc:
+                            continue
+                        for _r in _matched:
+                            _exists = any(
+                                e["Cod Barras Variante"] == _p_bc
+                                and e["EAN Componente"] == _r["_comp_bc"]
+                                for e in st.session_state["bom_draft"]
+                            )
+                            if not _exists:
+                                st.session_state["bom_draft"].append({
+                                    "Cod Barras Variante": _p_bc,
+                                    "EAN Componente":      _r["_comp_bc"],
+                                    "Cantidad":            _r["Cantidad"],
+                                    "_nombre_variante":    _plabel,
+                                    "_nombre_componente":  _r["_comp_label"],
+                                })
+                                _added += 1
+                    del st.session_state["pdf_analysis"]
+                    st.success(
+                        f"Añadidas {_added} entradas a la BOM en construcción."
+                    )
+                    st.rerun()
 
     # ── Copy BOM from one variant to others ───────────────────────────────────
     with st.expander("Copiar BOM a otras variantes", expanded=False):
