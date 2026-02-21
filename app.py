@@ -1249,6 +1249,12 @@ with tab2:
         draft_df = pd.DataFrame(st.session_state["bom_draft"])
         draft_df["_idx"] = range(len(draft_df))
 
+        # Enrich with variant attributes for filtering
+        _var_attrs = prenda_variants[
+            ["Código de barras principal", "Referencia interna", "Color", "Talla", "_tipo_prenda"]
+        ].rename(columns={"Código de barras principal": "Cod Barras Variante"})
+        draft_df = draft_df.merge(_var_attrs, on="Cod Barras Variante", how="left")
+
         # ── Controls row ─────────────────────────────────────────────────────
         _bom_ctrl_q, _bom_ctrl_exp, _bom_ctrl_col = st.columns([5, 1.3, 1.3])
         with _bom_ctrl_q:
@@ -1265,12 +1271,59 @@ with tab2:
             st.session_state["bom_all_expanded"] = False
             st.rerun()
 
+        # ── Filters ──────────────────────────────────────────────────────────
+        with st.expander("Filtros", expanded=False):
+            _fa, _fb, _fc, _fd, _fe = st.columns(5)
+            _f_refs = _fa.multiselect(
+                "Referencia",
+                sorted(draft_df["Referencia interna"].dropna().unique().tolist()),
+                key="bom_f_refs",
+                placeholder="Todas",
+            )
+            _f_colors = _fb.multiselect(
+                "Color",
+                sorted(draft_df["Color"].dropna().unique().tolist()),
+                key="bom_f_colors",
+                placeholder="Todos",
+            )
+            _f_tallas = _fc.multiselect(
+                "Talla",
+                sorted(draft_df["Talla"].dropna().unique().tolist()),
+                key="bom_f_tallas",
+                placeholder="Todas",
+            )
+            _f_tipos = _fd.multiselect(
+                "Tipo (4º dígito)",
+                sorted(draft_df["_tipo_prenda"].dropna().unique().tolist()),
+                key="bom_f_tipos",
+                placeholder="Todos",
+            )
+            _f_comps = _fe.multiselect(
+                "Componente",
+                sorted(draft_df["_nombre_componente"].dropna().unique().tolist()),
+                key="bom_f_comps",
+                placeholder="Todos",
+            )
+
+        # Apply text search
         if _bom_q:
             _mask = (
                 draft_df["_nombre_variante"].str.contains(_bom_q, case=False, na=False)
                 | draft_df["_nombre_componente"].str.contains(_bom_q, case=False, na=False)
             )
             draft_df = draft_df[_mask]
+
+        # Apply multiselect filters
+        if _f_refs:
+            draft_df = draft_df[draft_df["Referencia interna"].isin(_f_refs)]
+        if _f_colors:
+            draft_df = draft_df[draft_df["Color"].isin(_f_colors)]
+        if _f_tallas:
+            draft_df = draft_df[draft_df["Talla"].isin(_f_tallas)]
+        if _f_tipos:
+            draft_df = draft_df[draft_df["_tipo_prenda"].isin(_f_tipos)]
+        if _f_comps:
+            draft_df = draft_df[draft_df["_nombre_componente"].isin(_f_comps)]
 
         _all_exp = st.session_state.get("bom_all_expanded", True)
         to_delete = None
