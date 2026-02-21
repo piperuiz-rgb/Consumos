@@ -772,25 +772,37 @@ with tab2:
 
     with fc2:
         st.markdown("**Componente / Material**")
-        comp_source = st.radio(
-            "Origen del componente",
-            ["Del catálogo de variantes", "Introducir manualmente"],
-            horizontal=True,
+        _bom_cq = st.text_input(
+            "Buscar componente por referencia o nombre",
+            placeholder="ej. Tejido, entretela, forro…",
+            key="bom_comp_q",
             label_visibility="collapsed",
-            key="bom_comp_source",
         )
-        if comp_source == "Del catálogo de variantes":
+        _bom_cq_strip = _bom_cq.strip()
+        if _bom_cq_strip:
+            _bom_comp_filtered = comp_variants[
+                comp_variants["Referencia interna"].str.contains(_bom_cq_strip, case=False, na=False)
+                | comp_variants["Nombre"].str.contains(_bom_cq_strip, case=False, na=False)
+            ]
+        else:
+            _bom_comp_filtered = comp_variants
+        _bom_comp_opts = sorted(_bom_comp_filtered["_label"].unique().tolist())
+        if _bom_comp_opts:
             sel_comp_label = st.selectbox(
-                "Componente del catálogo",
-                options=comp_label_list,
+                "Componente",
+                options=_bom_comp_opts,
                 label_visibility="collapsed",
                 key="bom_sel_comp",
             )
             comp_ean = comp_label_to_bc.get(sel_comp_label, "")
             comp_display_name = sel_comp_label
         else:
+            st.warning("Sin resultados. Prueba con otro término.")
+            comp_ean = ""
+            comp_display_name = ""
+        if st.checkbox("No está en el catálogo (introducir EAN)", key="bom_comp_manual"):
             comp_ean = st.text_input(
-                "EAN / código del componente",
+                "EAN del componente",
                 key="bom_comp_ean",
                 placeholder="ej. 8412345678901",
             )
@@ -962,23 +974,35 @@ with tab2:
         bc1, bc2, bc3, bc4 = st.columns([2.5, 2.5, 1.2, 1.5])
 
         with bc1:
-            bulk_comp_source = st.radio(
-                "Origen",
-                ["Del catálogo", "EAN manual"],
-                horizontal=True,
+            _bulk_cq = st.text_input(
+                "Buscar componente por referencia o nombre",
+                placeholder="ej. Tejido, entretela, forro…",
+                key="bulk_comp_q",
                 label_visibility="collapsed",
-                key="bulk_comp_source",
             )
-            if bulk_comp_source == "Del catálogo":
+            _bulk_cq_strip = _bulk_cq.strip()
+            if _bulk_cq_strip:
+                _bulk_comp_filtered = comp_variants[
+                    comp_variants["Referencia interna"].str.contains(_bulk_cq_strip, case=False, na=False)
+                    | comp_variants["Nombre"].str.contains(_bulk_cq_strip, case=False, na=False)
+                ]
+            else:
+                _bulk_comp_filtered = comp_variants
+            _bulk_comp_opts = sorted(_bulk_comp_filtered["_label"].unique().tolist())
+            if _bulk_comp_opts:
                 bulk_sel_comp = st.selectbox(
-                    "Componente del catálogo",
-                    options=comp_label_list,
+                    "Componente",
+                    options=_bulk_comp_opts,
                     label_visibility="collapsed",
                     key="bulk_sel_comp",
                 )
                 bulk_comp_ean = comp_label_to_bc.get(bulk_sel_comp, "")
                 bulk_comp_name = bulk_sel_comp
             else:
+                st.warning("Sin resultados.")
+                bulk_comp_ean = ""
+                bulk_comp_name = ""
+            if st.checkbox("No está en el catálogo (introducir EAN)", key="bulk_comp_manual"):
                 bulk_comp_ean = st.text_input(
                     "EAN del componente",
                     placeholder="ej. 8412345678901",
