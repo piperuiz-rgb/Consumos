@@ -5,6 +5,7 @@ from datetime import date
 import os
 import json
 from pathlib import Path
+from groq import Groq
 
 # File used to persist the BOM draft across browser sessions
 BOM_SESSION_FILE = Path(__file__).parent / "bom_session.json"
@@ -26,7 +27,7 @@ def _save_bom_draft():
 st.set_page_config(
     page_title="Planificación de Consumos",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 st.markdown("""
@@ -161,6 +162,125 @@ def _sz_key(s):
         return (1, int(u), "")
     except ValueError:
         return (2, 0, str(s))
+
+
+# ── SIDEBAR — Asistente IA ────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("Asistente IA")
+    st.caption("Pregunta sobre la BOM, el plan o los consumos calculados.")
+
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
+
+    # ── Chat display ──────────────────────────────────────────────────────────
+    for msg in st.session_state["chat_history"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # ── User input ────────────────────────────────────────────────────────────
+    user_input = st.chat_input("Escribe tu pregunta…")
+
+    if user_input:
+        st.session_state["chat_history"].append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        # Build data context from current session state
+        _ctx_parts = []
+
+        # BOM activa
+        _active_bom_ctx = st.session_state.get("custom_bom", bom)
+        _n_bom = len(_active_bom_ctx)
+        _n_var_bom = _active_bom_ctx["Cod Barras Variante"].nunique()
+        _n_comp_bom = _active_bom_ctx["EAN Componente"].nunique()
+        _ctx_parts.append(
+            f"BOM activa: {_n_bom} entradas, {_n_var_bom} variantes de prenda, "
+            f"{_n_comp_bom} componentes distintos."
+        )
+
+        # BOM en construcción
+        _draft = st.session_state.get("bom_draft", [])
+        if _draft:
+            _draft_df_ctx = pd.DataFrame(_draft)
+            _ctx_parts.append(
+                f"BOM en construcción: {len(_draft)} entradas, "
+                f"{_draft_df_ctx['Cod Barras Variante'].nunique()} prendas."
+            )
+
+        # Plan de producción
+        _plan_qtys = {
+            k[4:]: int(v)
+            for k, v in st.session_state.items()
+            if k.startswith("qty_") and isinstance(v, (int, float)) and v > 0
+        }
+        if _plan_qtys:
+            _total_units = sum(_plan_qtys.values())
+            _ctx_parts.append(
+                f"Plan de producción activo: {len(_plan_qtys)} variantes, "
+                f"{_total_units} unidades totales."
+            )
+
+        # Resultados de consumos calculados
+        if "results_df" in st.session_state:
+            _res_ctx = st.session_state["results_df"]
+            _top5 = _res_ctx.nlargest(5, "Cantidad necesaria")[
+                ["Nombre", "Cantidad necesaria"]
+            ].to_dict("records")
+            _top5_str = "; ".join(
+                f"{r['Nombre']} ({r['Cantidad necesaria']})" for r in _top5
+            )
+            _ctx_parts.append(
+                f"Consumos calculados: {len(_res_ctx)} componentes. "
+                f"Top 5 por cantidad: {_top5_str}."
+            )
+
+        # Escenario simulado
+        if "sc_results" in st.session_state:
+            _sc_ctx = st.session_state["sc_results"]
+            _ctx_parts.append(
+                f"Escenario simulado: {len(_sc_ctx)} componentes calculados."
+            )
+
+        _context_block = "\n".join(f"- {p}" for p in _ctx_parts)
+
+        system_prompt = f"""Eres un asistente especializado en planificación de producción y \
+gestión de materiales para una empresa de moda. Ayudas al usuario a interpretar \
+y analizar los datos de su aplicación de consumos.
+
+Datos actuales disponibles en la aplicación:
+{_context_block}
+
+Responde siempre en español, de forma concisa y práctica. \
+Si el usuario pregunta algo que no puedes responder con los datos disponibles, \
+indícalo claramente y sugiere qué información necesitarías."""
+
+        _messages_ctx = [{"role": "system", "content": system_prompt}]
+        _messages_ctx += [
+            {"role": m["role"], "content": m["content"]}
+            for m in st.session_state["chat_history"]
+        ]
+
+        try:
+            _groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+            _response = _groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=_messages_ctx,
+                max_tokens=512,
+                temperature=0.3,
+            )
+            _answer = _response.choices[0].message.content
+        except Exception as _e:
+            _answer = f"Error al conectar con el asistente: {_e}"
+
+        st.session_state["chat_history"].append({"role": "assistant", "content": _answer})
+        with st.chat_message("assistant"):
+            st.markdown(_answer)
+
+    if st.session_state["chat_history"] and st.button(
+        "Limpiar conversación", use_container_width=True
+    ):
+        st.session_state["chat_history"] = []
+        st.rerun()
 
 
 # ── TABS ─────────────────────────────────────────────────────────────────────

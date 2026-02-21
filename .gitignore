@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 *.pyo
 bom_session.json
+.streamlit/secrets.toml
