@@ -644,9 +644,17 @@ with tab2:
         + " | "
         + all_variants["Talla"].fillna("").str.strip()
     )
+    # 4th character of Referencia interna identifies garment type
+    all_variants["_tipo_prenda"] = (
+        all_variants["Referencia interna"].fillna("").str[3:4].replace("", "—")
+    )
     variant_label_list = sorted(all_variants["_label"].unique().tolist())
     variant_label_to_bc = dict(
         zip(all_variants["_label"], all_variants["Código de barras principal"])
+    )
+    # Map label → tipo de prenda (used in Copiar BOM destination filter)
+    variant_label_to_tipo = dict(
+        zip(all_variants["_label"], all_variants["_tipo_prenda"])
     )
 
     # ── Load existing BOM as starting point ──────────────────────────────────
@@ -853,7 +861,7 @@ with tab2:
                 )
 
         st.markdown("— o filtra por atributos —")
-        bf1, bf2 = st.columns(2)
+        bf1, bf2, bf3 = st.columns(3)
         with bf1:
             bulk_refs = st.multiselect(
                 "Referencia interna",
@@ -879,6 +887,24 @@ with tab2:
                 placeholder="Todas las tallas",
                 key="bulk_tallas",
             )
+        with bf3:
+            _tipos_disp = sorted(
+                [
+                    t for t in all_variants["_tipo_prenda"].unique()
+                    if t and t != "—"
+                ],
+                key=lambda x: (len(x), x),
+            )
+            bulk_tipos = st.multiselect(
+                "Tipo de prenda (4º dígito de ref.)",
+                _tipos_disp,
+                placeholder="Todos los tipos",
+                key="bulk_tipos",
+                help=(
+                    "El 4º carácter de la referencia interna identifica el tipo de prenda. "
+                    "Ej.: ref. '2611x' → tipo '1'."
+                ),
+            )
 
         # Apply filters
         bulk_target = all_variants.copy()
@@ -898,6 +924,8 @@ with tab2:
             bulk_target = bulk_target[bulk_target["Color"].isin(bulk_colors)]
         if bulk_tallas:
             bulk_target = bulk_target[bulk_target["Talla"].isin(bulk_tallas)]
+        if bulk_tipos:
+            bulk_target = bulk_target[bulk_target["_tipo_prenda"].isin(bulk_tipos)]
 
         n_target = len(bulk_target)
         st.caption(f"**{n_target}** prendas seleccionadas")
@@ -1055,9 +1083,54 @@ with tab2:
 
         with _cp2:
             st.markdown("**Variantes destino**")
+            _dst_tipo_opts = sorted(
+                [t for t in set(variant_label_to_tipo.values()) if t and t != "—"],
+                key=lambda x: (len(x), x),
+            )
+            _filter_dst_tipos = st.multiselect(
+                "Filtrar destinos por tipo de prenda (4º dígito ref.)",
+                _dst_tipo_opts,
+                placeholder="Todos los tipos",
+                key="copy_dst_tipos",
+                help=(
+                    "Reduce la lista de destinos mostrando solo variantes cuya "
+                    "referencia tenga ese 4º dígito. Ej.: '1' → tipo 1."
+                ),
+            )
+            _filter_dst_color = st.multiselect(
+                "Filtrar destinos por color",
+                sorted(all_variants["Color"].dropna().unique().tolist()),
+                placeholder="Todos los colores",
+                key="copy_dst_color",
+            )
+            _filter_dst_talla = st.multiselect(
+                "Filtrar destinos por talla",
+                sorted(all_variants["Talla"].dropna().unique().tolist(), key=_sz_key),
+                placeholder="Todas las tallas",
+                key="copy_dst_talla",
+            )
+            # Build filtered destination option list
+            _dst_options = [l for l in variant_label_list if l != copy_src_label]
+            if _filter_dst_tipos:
+                _dst_options = [
+                    l for l in _dst_options
+                    if variant_label_to_tipo.get(l, "—") in _filter_dst_tipos
+                ]
+            if _filter_dst_color:
+                _color_map = dict(zip(all_variants["_label"], all_variants["Color"]))
+                _dst_options = [
+                    l for l in _dst_options
+                    if _color_map.get(l, "") in _filter_dst_color
+                ]
+            if _filter_dst_talla:
+                _talla_map = dict(zip(all_variants["_label"], all_variants["Talla"]))
+                _dst_options = [
+                    l for l in _dst_options
+                    if _talla_map.get(l, "") in _filter_dst_talla
+                ]
             copy_dst_labels = st.multiselect(
                 "Destino",
-                [l for l in variant_label_list if l != copy_src_label],
+                _dst_options,
                 label_visibility="collapsed",
                 key="copy_dst",
                 placeholder="Selecciona una o más variantes…",
