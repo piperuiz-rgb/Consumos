@@ -759,6 +759,219 @@ with tab1:
                 except Exception as _e:
                     st.error(f"Error al leer el fichero: {_e}")
 
+    # ── Import plan with AI ───────────────────────────────────────────────────
+    with st.expander("Importar plan con IA (Excel, CSV o PDF)", expanded=False):
+        st.markdown(
+            "Sube cualquier fichero con un pedido, lista de producción o documento similar. "
+            "La IA identificará las referencias, colores, tallas y cantidades, aunque el formato "
+            "no sea estándar."
+        )
+        _up_ai = st.file_uploader(
+            "Fichero para analizar",
+            type=["xlsx", "csv", "pdf"],
+            key="upload_plan_ai",
+            label_visibility="collapsed",
+        )
+
+        if _up_ai is not None:
+            if st.button("Analizar con IA", key="btn_ai_plan", use_container_width=True):
+                with st.spinner("Extrayendo contenido del fichero…"):
+                    try:
+                        # ── Extract text from the uploaded file ──────────────
+                        _fname = _up_ai.name.lower()
+                        _raw_text = ""
+
+                        if _fname.endswith(".pdf"):
+                            import pdfplumber as _plumber
+                            with _plumber.open(_up_ai) as _pdoc:
+                                for _pp in _pdoc.pages:
+                                    _pt = _pp.extract_text() or ""
+                                    _raw_text += _pt + "\n"
+                                    for _tbl in _pp.extract_tables():
+                                        for _row in _tbl:
+                                            _raw_text += "\t".join(
+                                                str(c) if c else "" for c in _row
+                                            ) + "\n"
+                        elif _fname.endswith(".csv"):
+                            _df_raw = pd.read_csv(_up_ai, dtype=str)
+                            _raw_text = _df_raw.to_csv(index=False)
+                        else:
+                            _df_raw = pd.read_excel(_up_ai, dtype=str)
+                            _raw_text = _df_raw.to_csv(index=False)
+
+                        if not _raw_text.strip():
+                            st.warning("No se pudo extraer texto del fichero.")
+                        else:
+                            # ── Build compact catalog for context ────────────
+                            _cat_lines = []
+                            for _, _vr in finished.drop_duplicates(
+                                subset=["Referencia interna", "Nombre", "Color", "Talla"]
+                            ).iterrows():
+                                _cat_lines.append(
+                                    f"{_vr['Referencia interna']} | {_vr['Nombre']} | "
+                                    f"{_vr['Color']} | {_vr['Talla']} | "
+                                    f"{_vr['Código de barras principal']}"
+                                )
+                            _catalog_text = "\n".join(_cat_lines[:600])  # cap to avoid token limit
+
+                            _ai_prompt = f"""Eres un asistente de planificación de producción para una empresa de moda.
+
+A continuación tienes el catálogo de variantes disponibles (Referencia | Nombre | Color | Talla | Código de barras):
+{_catalog_text}
+
+Ahora analiza el siguiente documento y extrae todas las unidades a producir.
+Devuelve SOLO un JSON válido con esta estructura, sin texto adicional:
+{{
+  "variantes": [
+    {{
+      "codigo_barras": "string (código de barras exacto del catálogo, si lo identificas)",
+      "referencia": "string (referencia interna, si la hay)",
+      "nombre": "string (nombre del producto)",
+      "color": "string",
+      "talla": "string",
+      "cantidad": integer
+    }}
+  ]
+}}
+
+Si no puedes identificar un código de barras exacto, deja ese campo vacío ("") e intenta rellenar referencia, nombre, color y talla lo mejor posible para que se pueda hacer el matching.
+Ignora filas con cantidad 0 o sin cantidad.
+
+DOCUMENTO A ANALIZAR:
+{_raw_text[:6000]}
+"""
+                            # ── Call Groq AI ──────────────────────────────────
+                            _ai_client = Groq(
+                                api_key=st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
+                            )
+                            _ai_resp = None
+                            for _attempt in range(3):
+                                try:
+                                    _ai_resp = _ai_client.chat.completions.create(
+                                        model="llama-3.3-70b-versatile",
+                                        messages=[{"role": "user", "content": _ai_prompt}],
+                                        temperature=0,
+                                        timeout=40,
+                                    )
+                                    break
+                                except Exception:
+                                    if _attempt < 2:
+                                        time.sleep(2 ** _attempt)
+                                    else:
+                                        raise
+
+                            _ai_text = _ai_resp.choices[0].message.content.strip()
+                            # Strip markdown fences if present
+                            if _ai_text.startswith("```"):
+                                _ai_text = "\n".join(
+                                    l for l in _ai_text.splitlines()
+                                    if not l.startswith("```")
+                                )
+                            _ai_json = json.loads(_ai_text)
+
+                            # ── Match to catalog ──────────────────────────────
+                            _bc_set = set(finished["Código de barras principal"].unique())
+                            _matched = []
+                            _unmatched = []
+
+                            for _item in _ai_json.get("variantes", []):
+                                _qty = int(_item.get("cantidad", 0))
+                                if _qty <= 0:
+                                    continue
+                                _bc = str(_item.get("codigo_barras", "")).strip()
+
+                                if _bc and _bc in _bc_set:
+                                    _row = finished[
+                                        finished["Código de barras principal"] == _bc
+                                    ].iloc[0]
+                                    _matched.append({
+                                        "barcode": _bc,
+                                        "nombre": _row["Nombre"],
+                                        "color": _row["Color"],
+                                        "talla": _row["Talla"],
+                                        "cantidad": _qty,
+                                    })
+                                else:
+                                    # Try fuzzy match on ref / name / color / talla
+                                    _ref = str(_item.get("referencia", "")).strip().upper()
+                                    _nom = str(_item.get("nombre", "")).strip().lower()
+                                    _col = str(_item.get("color", "")).strip().lower()
+                                    _tal = str(_item.get("talla", "")).strip().upper()
+
+                                    _cand = finished.copy()
+                                    if _ref:
+                                        _m = _cand["Referencia interna"].str.upper() == _ref
+                                        if _m.any():
+                                            _cand = _cand[_m]
+                                    if _nom:
+                                        _m2 = _cand["Nombre"].str.lower().str.contains(_nom, na=False)
+                                        if _m2.any():
+                                            _cand = _cand[_m2]
+                                    if _col:
+                                        _m3 = _cand["Color"].str.lower().str.contains(_col, na=False)
+                                        if _m3.any():
+                                            _cand = _cand[_m3]
+                                    if _tal:
+                                        _m4 = _cand["Talla"].str.upper() == _tal
+                                        if _m4.any():
+                                            _cand = _cand[_m4]
+
+                                    if len(_cand) == 1:
+                                        _row = _cand.iloc[0]
+                                        _matched.append({
+                                            "barcode": _row["Código de barras principal"],
+                                            "nombre": _row["Nombre"],
+                                            "color": _row["Color"],
+                                            "talla": _row["Talla"],
+                                            "cantidad": _qty,
+                                        })
+                                    else:
+                                        _unmatched.append({
+                                            "descripcion": f"{_item.get('nombre','')} / {_item.get('color','')} / {_item.get('talla','')}",
+                                            "cantidad": _qty,
+                                            "candidatos": len(_cand),
+                                        })
+
+                            st.session_state["ai_plan_matched"] = _matched
+                            st.session_state["ai_plan_unmatched"] = _unmatched
+                            st.rerun()
+
+                    except json.JSONDecodeError:
+                        st.error("La IA no devolvió un JSON válido. Intenta de nuevo o simplifica el fichero.")
+                    except Exception as _exc:
+                        st.error(f"Error durante el análisis: {_exc}")
+
+        # ── Preview & confirm ─────────────────────────────────────────────────
+        _matched_res = st.session_state.get("ai_plan_matched")
+        _unmatched_res = st.session_state.get("ai_plan_unmatched")
+
+        if _matched_res is not None:
+            if _matched_res:
+                st.markdown(f"**{len(_matched_res)} variante(s) identificadas:**")
+                _prev_df = pd.DataFrame(_matched_res)[["nombre", "color", "talla", "cantidad"]]
+                _prev_df.columns = ["Nombre", "Color", "Talla", "Uds"]
+                st.dataframe(_prev_df, use_container_width=True, hide_index=True)
+
+                if st.button("Aplicar al plan de producción", key="btn_apply_ai_plan", use_container_width=True, type="primary"):
+                    for _m in _matched_res:
+                        _sk = f"qty_{_m['barcode']}"
+                        st.session_state[_sk] = st.session_state.get(_sk, 0) + _m["cantidad"]
+                    del st.session_state["ai_plan_matched"]
+                    if "ai_plan_unmatched" in st.session_state:
+                        del st.session_state["ai_plan_unmatched"]
+                    st.success("Plan de producción actualizado.")
+                    st.rerun()
+            else:
+                st.warning("La IA no encontró variantes reconocibles en el fichero.")
+
+            if _unmatched_res:
+                with st.expander(f"{len(_unmatched_res)} ítem(s) no reconocido(s)", expanded=False):
+                    st.dataframe(
+                        pd.DataFrame(_unmatched_res),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
     # Placeholder filled after matrix so totals reflect current state
     summary_slot = st.empty()
 
