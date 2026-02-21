@@ -755,23 +755,23 @@ with tab2:
         _pfx_c1, _pfx_c2 = st.columns([2, 3])
         with _pfx_c1:
             bulk_ean_prefix = st.text_input(
-                "Prefijo del código de barras (colección)",
-                placeholder="ej. 261 o 844579…",
+                "Prefijo de referencia interna (colección)",
+                placeholder="ej. 261…",
                 key="bulk_ean_prefix",
                 help=(
-                    "Los primeros dígitos del EAN identifican la colección. "
-                    "Ej.: 261 → V&G 2026, 844579 → Ibiza."
+                    "Los primeros dígitos de la referencia interna identifican la colección. "
+                    "Ej.: 261 → V&G 2026."
                 ),
             )
         with _pfx_c2:
             if bulk_ean_prefix:
                 _pfx_preview = all_variants[
-                    all_variants["Código de barras principal"]
+                    all_variants["Referencia interna"]
                     .astype(str)
                     .str.startswith(bulk_ean_prefix.strip())
                 ]
                 st.caption(
-                    f"{len(_pfx_preview)} variantes cuyo EAN comienza por **{bulk_ean_prefix.strip()}**"
+                    f"{len(_pfx_preview)} variantes cuya referencia comienza por **{bulk_ean_prefix.strip()}**"
                 )
 
         st.markdown("— o filtra por atributos —")
@@ -806,7 +806,7 @@ with tab2:
         bulk_target = all_variants.copy()
         if bulk_ean_prefix:
             bulk_target = bulk_target[
-                bulk_target["Código de barras principal"]
+                bulk_target["Referencia interna"]
                 .astype(str)
                 .str.startswith(bulk_ean_prefix.strip())
             ]
