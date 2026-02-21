@@ -4,7 +4,9 @@ from io import BytesIO
 from datetime import date
 import os
 import json
+import time
 from pathlib import Path
+import groq as _groq_module
 from groq import Groq
 import pdfplumber
 
@@ -525,11 +527,14 @@ Responde siempre en español, de forma concisa.
         ]
 
         try:
-            _groq_client = Groq(api_key=st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", "")))
+            _groq_client = Groq(
+                api_key=st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", "")),
+                timeout=30.0,
+            )
 
             # First call — model may request a tool
             _resp1 = _groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model="llama-3.3-70b-versatile",
                 messages=_messages_api,
                 tools=_ai_tools,
                 tool_choice="auto",
@@ -572,7 +577,7 @@ Responde siempre en español, de forma concisa.
 
                 # Second call — model summarises what it did
                 _resp2 = _groq_client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
+                    model="llama-3.3-70b-versatile",
                     messages=_messages_api,
                     max_tokens=256,
                     temperature=0.2,
@@ -1621,47 +1626,75 @@ with tab2:
 
                 if _pdf_text:
                     with st.spinner("La IA está analizando los materiales…"):
-                        try:
-                            _pdf_groq = Groq(
-                                api_key=st.secrets.get(
-                                    "GROQ_API_KEY",
-                                    os.environ.get("GROQ_API_KEY", ""),
-                                )
+                        _pdf_comps = []
+                        _groq_api_key = st.secrets.get(
+                            "GROQ_API_KEY", os.environ.get("GROQ_API_KEY", "")
+                        )
+                        if not _groq_api_key:
+                            st.error(
+                                "No se encontró GROQ_API_KEY. Configúrala en "
+                                ".streamlit/secrets.toml o en las variables de entorno."
                             )
-                            _pdf_resp = _pdf_groq.chat.completions.create(
-                                model="llama-3.1-8b-instant",
-                                messages=[
-                                    {
-                                        "role": "system",
-                                        "content": (
-                                            "Eres un experto en fichas técnicas de prendas de moda. "
-                                            "Extrae TODOS los materiales, tejidos, forros, entretelas, "
-                                            "accesorios y componentes. Para cada componente detecta su "
-                                            "color si está indicado en la ficha. "
-                                            'Devuelve ÚNICAMENTE un JSON con la clave "componentes", '
-                                            "array de objetos con los campos: "
-                                            '"nombre" (string, tipo de material sin incluir el color), '
-                                            '"color" (string, color del componente o "" si no se especifica), '
-                                            '"cantidad" (número), '
-                                            '"unidad" (string: m, ud, kg, cm, etc.). '
-                                            "Si no hay cantidad usa 1. Si no hay unidad usa 'ud'."
-                                        ),
-                                    },
-                                    {
-                                        "role": "user",
-                                        "content": f"Ficha técnica:\n\n{_pdf_text}",
-                                    },
-                                ],
-                                response_format={"type": "json_object"},
-                                max_tokens=1024,
-                                temperature=0,
-                            )
-                            _pdf_comps = json.loads(
-                                _pdf_resp.choices[0].message.content
-                            ).get("componentes", [])
-                        except Exception as _ae:
-                            _pdf_comps = []
-                            st.error(f"Error en el análisis IA: {_ae}")
+                        else:
+                            for _attempt in range(3):
+                                try:
+                                    _pdf_groq = Groq(
+                                        api_key=_groq_api_key,
+                                        timeout=30.0,
+                                    )
+                                    _pdf_resp = _pdf_groq.chat.completions.create(
+                                        model="llama-3.3-70b-versatile",
+                                        messages=[
+                                            {
+                                                "role": "system",
+                                                "content": (
+                                                    "Eres un experto en fichas técnicas de prendas de moda. "
+                                                    "Extrae TODOS los materiales, tejidos, forros, entretelas, "
+                                                    "accesorios y componentes. Para cada componente detecta su "
+                                                    "color si está indicado en la ficha. "
+                                                    'Devuelve ÚNICAMENTE un JSON con la clave "componentes", '
+                                                    "array de objetos con los campos: "
+                                                    '"nombre" (string, tipo de material sin incluir el color), '
+                                                    '"color" (string, color del componente o "" si no se especifica), '
+                                                    '"cantidad" (número), '
+                                                    '"unidad" (string: m, ud, kg, cm, etc.). '
+                                                    "Si no hay cantidad usa 1. Si no hay unidad usa 'ud'."
+                                                ),
+                                            },
+                                            {
+                                                "role": "user",
+                                                "content": f"Ficha técnica:\n\n{_pdf_text}",
+                                            },
+                                        ],
+                                        response_format={"type": "json_object"},
+                                        max_tokens=1024,
+                                        temperature=0,
+                                    )
+                                    _pdf_comps = json.loads(
+                                        _pdf_resp.choices[0].message.content
+                                    ).get("componentes", [])
+                                    break  # success — exit retry loop
+                                except (
+                                    _groq_module.APIConnectionError,
+                                    _groq_module.APITimeoutError,
+                                ) as _ae:
+                                    if _attempt < 2:
+                                        time.sleep(2 ** _attempt)
+                                        continue
+                                    st.error(
+                                        f"Error de conexión con la IA tras 3 intentos: {_ae}. "
+                                        "Comprueba la conectividad de red o el estado de la API de Groq "
+                                        "(https://status.groq.com)."
+                                    )
+                                except _groq_module.AuthenticationError:
+                                    st.error(
+                                        "La clave GROQ_API_KEY no es válida. "
+                                        "Revísala en .streamlit/secrets.toml."
+                                    )
+                                    break
+                                except Exception as _ae:
+                                    st.error(f"Error en el análisis IA: {_ae}")
+                                    break
 
                     if _pdf_comps:
                         # Smart color-aware matching: for each finished variant, find
