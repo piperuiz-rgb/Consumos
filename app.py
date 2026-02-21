@@ -3,6 +3,25 @@ import pandas as pd
 from io import BytesIO
 from datetime import date
 import os
+import json
+from pathlib import Path
+
+# File used to persist the BOM draft across browser sessions
+BOM_SESSION_FILE = Path(__file__).parent / "bom_session.json"
+
+
+def _save_bom_draft():
+    """Write bom_draft to disk so it survives page reloads."""
+    try:
+        data = [
+            {**e, "Cantidad": float(e["Cantidad"])}
+            for e in st.session_state.get("bom_draft", [])
+        ]
+        BOM_SESSION_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
 
 st.set_page_config(
     page_title="Planificación de Consumos",
@@ -390,9 +409,15 @@ with tab1:
         if k.startswith("qty_") and isinstance(v, (int, float)) and v > 0
     }
     if fresh_qtys:
+        _fresh_with_bom = sum(1 for bc in fresh_qtys if bc in _bom_covered)
+        _bom_ok = _fresh_with_bom == len(fresh_qtys)
+        _bom_status = (
+            f" · BOM: **{_fresh_with_bom}/{len(fresh_qtys)}** variantes cubiertas"
+            + ("" if _bom_ok else " ⚠️")
+        )
         summary_slot.info(
             f"**{len(fresh_qtys)}** variantes con cantidad asignada — "
-            f"**{sum(fresh_qtys.values())}** unidades totales"
+            f"**{sum(fresh_qtys.values())}** unidades totales{_bom_status}"
         )
 
     st.divider()
@@ -489,6 +514,45 @@ with tab1:
         st.subheader("Resumen del plan de producción")
         st.dataframe(plan_df, hide_index=True, use_container_width=True)
 
+        # ── Consumos por colección ────────────────────────────────────────────
+        with st.expander("Consumos por colección", expanded=False):
+            _active_bom_coll = st.session_state.get("custom_bom", bom)
+            _coll_map: dict[tuple, float] = {}
+            for _, _pr in plan_df.iterrows():
+                _bc = _pr["Código de barras"]
+                _qty = int(_pr["Unidades"])
+                _coll = str(_pr.get("Referencia", "")).strip()[:3] or "—"
+                for _, _br in _active_bom_coll[
+                    _active_bom_coll["Cod Barras Variante"] == _bc
+                ].iterrows():
+                    _comp = str(_br["EAN Componente"])
+                    _cname = barcode_lookup.get(_comp, {}).get("Nombre", _comp)
+                    _key = (_coll, _comp, _cname)
+                    _coll_map[_key] = _coll_map.get(_key, 0.0) + float(_br["Cantidad"]) * _qty
+            if _coll_map:
+                _coll_df = pd.DataFrame([
+                    {
+                        "Colección": k[0],
+                        "Componente": k[2],
+                        "EAN": k[1],
+                        "Cantidad total": round(v, 4),
+                    }
+                    for k, v in _coll_map.items()
+                ]).sort_values(["Colección", "Componente"]).reset_index(drop=True)
+                st.dataframe(_coll_df, hide_index=True, use_container_width=True)
+                _coll_buf = BytesIO()
+                with pd.ExcelWriter(_coll_buf, engine="openpyxl") as _w:
+                    _coll_df.to_excel(_w, index=False, sheet_name="Por colección")
+                st.download_button(
+                    "Descargar por colección (Excel)",
+                    _coll_buf.getvalue(),
+                    "consumos_por_coleccion.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            else:
+                st.info("No hay datos de colección disponibles (comprueba que la BOM esté activa).")
+
         st.subheader("Descargar resultados")
         pet_fecha = st.date_input(
             "Fecha de transferencia (plantilla PET)",
@@ -551,9 +615,23 @@ with tab2:
         "Una vez completa, actívala para usarla en el cálculo de consumos."
     )
 
-    # Initialize BOM draft in session state
+    # Initialize BOM draft — load from disk if first run of this session
     if "bom_draft" not in st.session_state:
-        st.session_state["bom_draft"] = []
+        if BOM_SESSION_FILE.exists():
+            try:
+                st.session_state["bom_draft"] = json.loads(
+                    BOM_SESSION_FILE.read_text("utf-8")
+                )
+                if st.session_state["bom_draft"]:
+                    st.info(
+                        f"Se ha restaurado la BOM de la sesión anterior "
+                        f"({len(st.session_state['bom_draft'])} entradas).",
+                        icon="💾",
+                    )
+            except Exception:
+                st.session_state["bom_draft"] = []
+        else:
+            st.session_state["bom_draft"] = []
 
     # ── Build variant option lists ────────────────────────────────────────────
     all_variants = variantes.dropna(subset=["Código de barras principal"]).copy()
@@ -947,6 +1025,95 @@ with tab2:
                 st.success(f"Asignación completada: {', '.join(parts)}.")
                 st.rerun()
 
+    # ── Copy BOM from one variant to others ───────────────────────────────────
+    with st.expander("Copiar BOM a otras variantes", expanded=False):
+        st.markdown(
+            "Copia todos los componentes de una variante origen a una o más variantes destino. "
+            "Útil cuando varias tallas o colores comparten la misma estructura de materiales."
+        )
+        _cp1, _cp2 = st.columns(2)
+
+        with _cp1:
+            st.markdown("**Variante origen**")
+            copy_src_label = st.selectbox(
+                "Origen",
+                variant_label_list,
+                label_visibility="collapsed",
+                key="copy_src",
+            )
+            copy_src_bc = variant_label_to_bc.get(copy_src_label, "")
+            _src_entries = [
+                e for e in st.session_state["bom_draft"]
+                if e["Cod Barras Variante"] == copy_src_bc
+            ]
+            if _src_entries:
+                st.caption(f"{len(_src_entries)} componente(s) en la BOM de origen")
+                for _se in _src_entries:
+                    st.caption(f"  · {_se['_nombre_componente']} — x{_se['Cantidad']:.3g}")
+            else:
+                st.warning("Esta variante no tiene BOM definida aún.")
+
+        with _cp2:
+            st.markdown("**Variantes destino**")
+            copy_dst_labels = st.multiselect(
+                "Destino",
+                [l for l in variant_label_list if l != copy_src_label],
+                label_visibility="collapsed",
+                key="copy_dst",
+                placeholder="Selecciona una o más variantes…",
+            )
+            copy_dup_mode = st.radio(
+                "Si el componente ya existe en destino",
+                ["Omitir", "Sobreescribir"],
+                horizontal=True,
+                key="copy_dup_mode",
+            )
+            _copy_btn = st.button(
+                f"Copiar BOM a {len(copy_dst_labels)} variante(s)",
+                type="primary",
+                use_container_width=True,
+                key="btn_copy_bom",
+                disabled=(not _src_entries or not copy_dst_labels),
+            )
+
+        if _copy_btn:
+            _cp_added = _cp_updated = _cp_skipped = 0
+            for _dst_label in copy_dst_labels:
+                _dst_bc = variant_label_to_bc.get(_dst_label, "")
+                for _se in _src_entries:
+                    _ex_idx = next(
+                        (
+                            i for i, e in enumerate(st.session_state["bom_draft"])
+                            if e["Cod Barras Variante"] == _dst_bc
+                            and e["EAN Componente"] == _se["EAN Componente"]
+                        ),
+                        None,
+                    )
+                    if _ex_idx is not None:
+                        if copy_dup_mode == "Sobreescribir":
+                            st.session_state["bom_draft"][_ex_idx]["Cantidad"] = _se["Cantidad"]
+                            _cp_updated += 1
+                        else:
+                            _cp_skipped += 1
+                    else:
+                        st.session_state["bom_draft"].append({
+                            "Cod Barras Variante": _dst_bc,
+                            "EAN Componente": _se["EAN Componente"],
+                            "Cantidad": _se["Cantidad"],
+                            "_nombre_variante": _dst_label,
+                            "_nombre_componente": _se["_nombre_componente"],
+                        })
+                        _cp_added += 1
+            _parts = []
+            if _cp_added:
+                _parts.append(f"{_cp_added} añadidas")
+            if _cp_updated:
+                _parts.append(f"{_cp_updated} actualizadas")
+            if _cp_skipped:
+                _parts.append(f"{_cp_skipped} omitidas")
+            st.success(f"Copia completada: {', '.join(_parts)}.")
+            st.rerun()
+
     st.divider()
 
     # ── BOM table ────────────────────────────────────────────────────────────
@@ -960,6 +1127,19 @@ with tab2:
     else:
         draft_df = pd.DataFrame(st.session_state["bom_draft"])
         draft_df["_idx"] = range(len(draft_df))
+
+        _bom_q = st.text_input(
+            "Buscar en la BOM",
+            placeholder="Nombre de variante o componente…",
+            key="bom_table_q",
+            label_visibility="collapsed",
+        )
+        if _bom_q:
+            _mask = (
+                draft_df["_nombre_variante"].str.contains(_bom_q, case=False, na=False)
+                | draft_df["_nombre_componente"].str.contains(_bom_q, case=False, na=False)
+            )
+            draft_df = draft_df[_mask]
 
         to_delete = None
 
@@ -1055,3 +1235,6 @@ with tab2:
                     "BOM personalizada activada. "
                     "Ve a la pestaña 'Plan de producción' y pulsa 'Calcular Consumos'."
                 )
+
+# ── Auto-save BOM draft to disk on every render ───────────────────────────────
+_save_bom_draft()
