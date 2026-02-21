@@ -13,6 +13,38 @@ import pdfplumber
 # File used to persist the BOM draft across browser sessions
 BOM_SESSION_FILE = Path(__file__).parent / "bom_session.json"
 
+# File used to persist custom catalog additions
+EXTRAS_FILE = Path(__file__).parent / "variantes_extras.json"
+
+
+def _load_extras() -> list:
+    """Return the list of custom variant entries from disk."""
+    if EXTRAS_FILE.exists():
+        try:
+            return json.loads(EXTRAS_FILE.read_text("utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_extras(entries: list):
+    EXTRAS_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _add_extra_variant(entry: dict):
+    """Append a new custom variant, persist and clear the data cache."""
+    entries = _load_extras()
+    entries.append(entry)
+    _save_extras(entries)
+    load_data.clear()
+
+
+def _delete_extra_variant(barcode: str):
+    """Remove a custom variant by barcode, persist and clear the data cache."""
+    entries = [e for e in _load_extras() if e.get("Código de barras principal") != barcode]
+    _save_extras(entries)
+    load_data.clear()
+
 
 def _save_bom_draft():
     """Write bom_draft to disk so it survives page reloads."""
@@ -144,6 +176,22 @@ def load_data():
     )
     variantes["Color"] = variantes["Color"].str.replace("Color: ", "", regex=False).str.strip()
     variantes["Talla"] = variantes["Talla"].str.replace("Talla: ", "", regex=False).str.strip()
+    variantes["_es_prenda"] = False  # base catalog flag (resolved later by EAN pattern)
+
+    # Merge custom additions from disk
+    _extras = _load_extras()
+    if _extras:
+        _extras_df = pd.DataFrame(_extras)
+        for _col in ["Nombre", "Referencia interna", "Color", "Talla", "Código de barras principal"]:
+            if _col not in _extras_df.columns:
+                _extras_df[_col] = ""
+        if "_es_prenda" not in _extras_df.columns:
+            _extras_df["_es_prenda"] = False
+        _extras_df["_es_prenda"] = _extras_df["_es_prenda"].astype(bool)
+        # Drop any extras whose barcode already exists in the base file
+        _existing_bcs = set(variantes["Código de barras principal"].unique())
+        _extras_df = _extras_df[~_extras_df["Código de barras principal"].isin(_existing_bcs)]
+        variantes = pd.concat([variantes, _extras_df], ignore_index=True)
 
     barcode_lookup = variantes.set_index("Código de barras principal").to_dict("index")
     bom_barcodes = set(bom["Cod Barras Variante"].unique())
@@ -1314,10 +1362,16 @@ with tab2:
     )
 
     _bc_col = "Código de barras principal"
-    _is_finished = (
+    _ean_mask = (
         all_variants[_bc_col].str.len().eq(13)
         & all_variants[_bc_col].str.startswith("8445790")
     )
+    _extra_prenda_mask = (
+        all_variants["_es_prenda"].astype(bool)
+        if "_es_prenda" in all_variants.columns
+        else pd.Series(False, index=all_variants.index)
+    )
+    _is_finished = _ean_mask | _extra_prenda_mask
 
     # Finished products only (prenda selectors)
     prenda_variants = all_variants[_is_finished].copy()
@@ -2579,6 +2633,111 @@ with tab2:
                     "BOM personalizada activada. "
                     "Ve a la pestaña 'Plan de producción' y pulsa 'Calcular Consumos'."
                 )
+
+    # ── Add / manage custom catalog items ────────────────────────────────────
+    st.divider()
+    with st.expander("Añadir artículo al catálogo", expanded=False):
+        st.markdown(
+            "Añade productos terminados o componentes que no estén en el catálogo base. "
+            "Los artículos se guardan en disco y están disponibles en todos los selectores "
+            "de esta pestaña desde el momento en que se añaden."
+        )
+
+        _ext_tipo = st.radio(
+            "Tipo de artículo",
+            ["Producto terminado", "Componente / Material"],
+            horizontal=True,
+            key="ext_tipo",
+        )
+        _es_prenda_nuevo = _ext_tipo == "Producto terminado"
+
+        _en1, _en2 = st.columns(2)
+        with _en1:
+            _ext_nombre = st.text_input("Nombre *", key="ext_nombre", placeholder="ej. Vestido Marina")
+            _ext_ref = st.text_input(
+                "Referencia interna *", key="ext_ref", placeholder="ej. 261101"
+            )
+            _ext_bc = st.text_input(
+                "Código de barras *",
+                key="ext_bc",
+                placeholder="ej. 8445790012345" if _es_prenda_nuevo else "ej. MAT-FORRO-BEIGE",
+            )
+        with _en2:
+            _ext_color = st.text_input(
+                "Color" + (" *" if _es_prenda_nuevo else ""),
+                key="ext_color",
+                placeholder="ej. Beige",
+            )
+            _ext_talla = st.text_input(
+                "Talla" + (" *" if _es_prenda_nuevo else ""),
+                key="ext_talla",
+                placeholder="ej. M",
+            )
+
+        _btn_add_ext = st.button("Añadir al catálogo", key="btn_add_ext", type="primary")
+
+        if _btn_add_ext:
+            _err_ext = []
+            if not _ext_nombre.strip():
+                _err_ext.append("Nombre es obligatorio.")
+            if not _ext_ref.strip():
+                _err_ext.append("Referencia interna es obligatoria.")
+            if not _ext_bc.strip():
+                _err_ext.append("Código de barras es obligatorio.")
+            if _es_prenda_nuevo and not _ext_color.strip():
+                _err_ext.append("Color es obligatorio para productos terminados.")
+            if _es_prenda_nuevo and not _ext_talla.strip():
+                _err_ext.append("Talla es obligatoria para productos terminados.")
+            # Check for barcode duplicates
+            _all_bcs = set(variantes["Código de barras principal"].unique())
+            if _ext_bc.strip() in _all_bcs:
+                _err_ext.append(f"El código de barras '{_ext_bc.strip()}' ya existe en el catálogo.")
+
+            if _err_ext:
+                for _e in _err_ext:
+                    st.error(_e)
+            else:
+                _new_entry = {
+                    "Nombre": _ext_nombre.strip(),
+                    "Referencia interna": _ext_ref.strip(),
+                    "Color": _ext_color.strip(),
+                    "Talla": _ext_talla.strip(),
+                    "Código de barras principal": _ext_bc.strip(),
+                    "_es_prenda": _es_prenda_nuevo,
+                }
+                _add_extra_variant(_new_entry)
+                st.success(
+                    f"'{_ext_nombre.strip()}' añadido al catálogo. "
+                    "Recargando datos…"
+                )
+                st.rerun()
+
+        # ── View / delete custom items ─────────────────────────────────────────
+        _current_extras = _load_extras()
+        if _current_extras:
+            st.divider()
+            st.markdown(f"**Artículos personalizados en el catálogo** ({len(_current_extras)})")
+            _ext_df = pd.DataFrame(_current_extras)[
+                ["Nombre", "Referencia interna", "Color", "Talla",
+                 "Código de barras principal", "_es_prenda"]
+            ].rename(columns={"_es_prenda": "Prenda"})
+            _ext_df["Prenda"] = _ext_df["Prenda"].map({True: "Terminado", False: "Componente"})
+            st.dataframe(_ext_df, use_container_width=True, hide_index=True)
+
+            _del_bc = st.selectbox(
+                "Eliminar artículo por código de barras",
+                [""] + [e["Código de barras principal"] for e in _current_extras],
+                key="ext_del_bc",
+                label_visibility="collapsed",
+                placeholder="Selecciona para eliminar…",
+            )
+            if _del_bc and st.button(
+                f"Eliminar '{_del_bc}'", key="btn_del_ext", use_container_width=True
+            ):
+                _delete_extra_variant(_del_bc)
+                st.success("Artículo eliminado del catálogo.")
+                st.rerun()
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — Simulador de escenarios
