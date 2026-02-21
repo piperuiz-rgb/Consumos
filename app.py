@@ -164,7 +164,7 @@ def _sz_key(s):
 
 
 # ── TABS ─────────────────────────────────────────────────────────────────────
-tab1, tab2 = st.tabs(["Plan de producción", "Crear / Editar BOM"])
+tab1, tab2, tab3 = st.tabs(["Plan de producción", "Crear / Editar BOM", "Simulador de escenarios"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1256,12 +1256,19 @@ with tab2:
         draft_df = draft_df.merge(_var_attrs, on="Cod Barras Variante", how="left")
 
         # ── Controls row ─────────────────────────────────────────────────────
-        _bom_ctrl_q, _bom_ctrl_exp, _bom_ctrl_col = st.columns([5, 1.3, 1.3])
+        _bom_ctrl_q, _bom_ctrl_sort, _bom_ctrl_exp, _bom_ctrl_col = st.columns([4, 2.5, 1.3, 1.3])
         with _bom_ctrl_q:
             _bom_q = st.text_input(
                 "Buscar en la BOM",
                 placeholder="Nombre de variante o componente…",
                 key="bom_table_q",
+                label_visibility="collapsed",
+            )
+        with _bom_ctrl_sort:
+            _bom_sort = st.selectbox(
+                "Ordenar componentes",
+                ["Sin ordenar", "Nombre A→Z", "Cantidad ↓", "Cantidad ↑"],
+                key="bom_sort",
                 label_visibility="collapsed",
             )
         if _bom_ctrl_exp.button("Expandir todo", use_container_width=True, key="bom_expand_all"):
@@ -1272,7 +1279,12 @@ with tab2:
             st.rerun()
 
         # ── Filters ──────────────────────────────────────────────────────────
-        with st.expander("Filtros", expanded=False):
+        _n_active_filters = sum(
+            bool(st.session_state.get(k, []))
+            for k in ["bom_f_refs", "bom_f_colors", "bom_f_tallas", "bom_f_tipos", "bom_f_comps"]
+        )
+        _filt_label = f"Filtros  ·  {_n_active_filters} activos" if _n_active_filters else "Filtros"
+        with st.expander(_filt_label, expanded=False):
             _fa, _fb, _fc, _fd, _fe = st.columns(5)
             _f_refs = _fa.multiselect(
                 "Referencia",
@@ -1329,6 +1341,12 @@ with tab2:
         to_delete = None
 
         for bc_var, group in draft_df.groupby("Cod Barras Variante", sort=False):
+            if _bom_sort == "Nombre A→Z":
+                group = group.sort_values("_nombre_componente")
+            elif _bom_sort == "Cantidad ↓":
+                group = group.sort_values("Cantidad", ascending=False)
+            elif _bom_sort == "Cantidad ↑":
+                group = group.sort_values("Cantidad", ascending=True)
             var_name = group.iloc[0]["_nombre_variante"]
             n_comp = len(group)
             label = f"{var_name}  ·  {n_comp} componente{'s' if n_comp != 1 else ''}"
@@ -1369,13 +1387,31 @@ with tab2:
 
         # ── Actions ──────────────────────────────────────────────────────────
         st.subheader("Acciones")
-        ac1, ac2, ac3 = st.columns(3)
+        ac1, ac_dup, ac2, ac3 = st.columns(4)
 
         with ac1:
             if st.button("Limpiar todo", use_container_width=True):
                 st.session_state["bom_draft"] = []
                 if "custom_bom" in st.session_state:
                     del st.session_state["custom_bom"]
+                st.rerun()
+
+        with ac_dup:
+            _dup_pairs = [
+                (e["Cod Barras Variante"], e["EAN Componente"])
+                for e in st.session_state["bom_draft"]
+            ]
+            _n_dups = len(_dup_pairs) - len(set(_dup_pairs))
+            _dup_label = f"Eliminar duplicados ({_n_dups})" if _n_dups else "Sin duplicados"
+            if st.button(_dup_label, use_container_width=True, disabled=(_n_dups == 0)):
+                _seen: dict = {}
+                for entry in st.session_state["bom_draft"]:
+                    key = (entry["Cod Barras Variante"], entry["EAN Componente"])
+                    if key in _seen:
+                        _seen[key]["Cantidad"] += float(entry["Cantidad"])
+                    else:
+                        _seen[key] = {**entry, "Cantidad": float(entry["Cantidad"])}
+                st.session_state["bom_draft"] = list(_seen.values())
                 st.rerun()
 
         with ac2:
@@ -1418,6 +1454,215 @@ with tab2:
                     "BOM personalizada activada. "
                     "Ve a la pestaña 'Plan de producción' y pulsa 'Calcular Consumos'."
                 )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Simulador de escenarios
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab3:
+    st.header("Simulador de escenarios")
+    st.markdown(
+        "Introduce cantidades hipotéticas para calcular consumos sin modificar el plan real. "
+        "Usa la BOM activa en ese momento."
+    )
+
+    active_bom_sc = st.session_state.get("custom_bom", bom)
+
+    # ── Filters ──────────────────────────────────────────────────────────────
+    sc_c1, sc_c2, sc_c3, sc_c4 = st.columns([3, 2, 2, 2])
+    with sc_c1:
+        sc_q = st.text_input("Buscar por nombre", placeholder="ej. Vestido Goya…", key="sc_q")
+    with sc_c2:
+        sc_color = st.selectbox(
+            "Color", ["Todos"] + sorted(finished["Color"].dropna().unique().tolist()), key="sc_color"
+        )
+    with sc_c3:
+        sc_talla = st.selectbox(
+            "Talla",
+            ["Todas"] + sorted(finished["Talla"].dropna().unique().tolist(), key=_sz_key),
+            key="sc_talla",
+        )
+    with sc_c4:
+        sc_ref = st.selectbox(
+            "Referencia",
+            ["Todas"] + sorted(finished["Referencia interna"].dropna().unique().tolist()),
+            key="sc_ref",
+        )
+
+    sc_df = finished.copy()
+    if sc_q:
+        sc_df = sc_df[sc_df["Nombre"].str.contains(sc_q, case=False, na=False)]
+    if sc_color != "Todos":
+        sc_df = sc_df[sc_df["Color"] == sc_color]
+    if sc_talla != "Todas":
+        sc_df = sc_df[sc_df["Talla"] == sc_talla]
+    if sc_ref != "Todas":
+        sc_df = sc_df[sc_df["Referencia interna"] == sc_ref]
+
+    st.caption(f"{len(sc_df)} variantes mostradas")
+
+    # ── Bulk assignment ───────────────────────────────────────────────────────
+    def _sc_bulk_apply(target_df, delta):
+        for bc in target_df["Código de barras principal"]:
+            sk = f"sc_qty_{bc}"
+            cur = st.session_state.get(sk, 0)
+            st.session_state[sk] = 0 if delta is None else max(0, cur + delta)
+
+    with st.expander("Asignación masiva", expanded=False):
+        _sm1, _sm2 = st.columns(2)
+        sc_bulk_tallas = _sm1.multiselect(
+            "Filtrar por talla",
+            sorted(sc_df["Talla"].dropna().unique().tolist(), key=_sz_key),
+            placeholder="Todas las tallas visibles",
+            key="sc_bulk_tallas",
+        )
+        sc_bulk_colors = _sm2.multiselect(
+            "Filtrar por color",
+            sorted(sc_df["Color"].dropna().unique().tolist()),
+            placeholder="Todos los colores visibles",
+            key="sc_bulk_colors",
+        )
+        sc_sub_bulk = sc_df.copy()
+        if sc_bulk_tallas:
+            sc_sub_bulk = sc_sub_bulk[sc_sub_bulk["Talla"].isin(sc_bulk_tallas)]
+        if sc_bulk_colors:
+            sc_sub_bulk = sc_sub_bulk[sc_sub_bulk["Color"].isin(sc_bulk_colors)]
+        st.caption(f"Afecta a **{len(sc_sub_bulk)}** de {len(sc_df)} variantes visibles")
+        _sb1, _sb2, _sb3, _ss, _sb4, _sb5, _sb6, _ss2, _sb7 = st.columns(
+            [1, 1, 1, 0.3, 1, 1, 1, 0.3, 1.4]
+        )
+        if _sb1.button("− 10", use_container_width=True, key="sc_m10"):
+            _sc_bulk_apply(sc_sub_bulk, -10)
+        if _sb2.button("− 5", use_container_width=True, key="sc_m5"):
+            _sc_bulk_apply(sc_sub_bulk, -5)
+        if _sb3.button("− 1", use_container_width=True, key="sc_m1"):
+            _sc_bulk_apply(sc_sub_bulk, -1)
+        if _sb4.button("+ 1", use_container_width=True, key="sc_p1"):
+            _sc_bulk_apply(sc_sub_bulk, 1)
+        if _sb5.button("+ 5", use_container_width=True, key="sc_p5"):
+            _sc_bulk_apply(sc_sub_bulk, 5)
+        if _sb6.button("+ 10", use_container_width=True, key="sc_p10"):
+            _sc_bulk_apply(sc_sub_bulk, 10)
+        if _sb7.button("Poner a 0", use_container_width=True, key="sc_reset"):
+            _sc_bulk_apply(sc_sub_bulk, None)
+
+    # ── Quantity matrix ───────────────────────────────────────────────────────
+    _bom_covered_sc = set(active_bom_sc["Cod Barras Variante"].unique())
+
+    for (ref, nombre), grp in sc_df.groupby(["Referencia interna", "Nombre"], sort=True):
+        colors = sorted(grp["Color"].dropna().unique().tolist())
+        tallas = sorted(grp["Talla"].dropna().unique().tolist(), key=_sz_key)
+        bc_map = {
+            (r["Color"], r["Talla"]): r["Código de barras principal"]
+            for _, r in grp.iterrows()
+        }
+        _missing_sc = sum(1 for bc in bc_map.values() if bc not in _bom_covered_sc)
+        _warn_html = (
+            f'<span class="bom-warn">(sin BOM: {_missing_sc} var.)</span>'
+            if _missing_sc else ""
+        )
+        st.markdown(
+            f'<div class="ref-card"><span class="ref-title">{ref} &nbsp;·&nbsp; {nombre}</span>'
+            f'{_warn_html}</div>',
+            unsafe_allow_html=True,
+        )
+        ratios = [0.8] + [2.5] * len(colors) + [1.0]
+        hcols = st.columns(ratios)
+        hcols[0].write("")
+        for ci, color in enumerate(colors):
+            hcols[ci + 1].markdown(f'<div class="col-hdr">{color}</div>', unsafe_allow_html=True)
+        hcols[-1].markdown('<div class="col-hdr-tot">Total</div>', unsafe_allow_html=True)
+
+        col_totals = [0] * len(colors)
+        for talla in tallas:
+            rcols = st.columns(ratios)
+            rcols[0].markdown(f'<div class="sz-lbl">{talla}</div>', unsafe_allow_html=True)
+            row_total = 0
+            for ci, color in enumerate(colors):
+                bc = bc_map.get((color, talla))
+                if bc is None:
+                    continue
+                sk = f"sc_qty_{bc}"
+                if sk not in st.session_state:
+                    st.session_state[sk] = 0
+                with rcols[ci + 1]:
+                    v = st.number_input(
+                        talla, min_value=0, step=1, key=sk, label_visibility="collapsed"
+                    )
+                row_total += int(v)
+                col_totals[ci] += int(v)
+            cls = "tot-val" if row_total > 0 else "tot-zero"
+            rcols[-1].markdown(
+                f'<div class="{cls}">{row_total if row_total > 0 else "—"}</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ── Calculate ─────────────────────────────────────────────────────────────
+    st.divider()
+    sc_btn_c1, sc_btn_c2 = st.columns([2, 5])
+    _sc_calcular = sc_btn_c1.button(
+        "Calcular escenario", type="primary", use_container_width=True, key="sc_calcular"
+    )
+    if sc_btn_c2.button("Limpiar escenario", use_container_width=True, key="sc_limpiar"):
+        for _k in list(st.session_state.keys()):
+            if _k.startswith("sc_qty_"):
+                del st.session_state[_k]
+        st.session_state.pop("sc_results", None)
+        st.rerun()
+
+    if _sc_calcular:
+        sc_qtys = {
+            k[7:]: int(v)
+            for k, v in st.session_state.items()
+            if k.startswith("sc_qty_") and isinstance(v, (int, float)) and v > 0
+        }
+        if not sc_qtys:
+            st.warning("Introduce al menos una cantidad en el escenario.")
+        else:
+            sc_comp_totals: dict[str, float] = {}
+            for bc, qty in sc_qtys.items():
+                for _, brow in active_bom_sc[active_bom_sc["Cod Barras Variante"] == bc].iterrows():
+                    comp = str(brow["EAN Componente"])
+                    sc_comp_totals[comp] = sc_comp_totals.get(comp, 0.0) + float(brow["Cantidad"]) * qty
+
+            sc_results = []
+            for comp_bc, total_qty in sc_comp_totals.items():
+                info = barcode_lookup.get(comp_bc, {})
+                col_ = str(info.get("Color", "")).strip()
+                tal_ = str(info.get("Talla", "")).strip()
+                sc_results.append({
+                    "Referencia": info.get("Referencia interna", ""),
+                    "Nombre": info.get("Nombre", f"Componente {comp_bc}"),
+                    "Color": col_ if col_ not in ("", "nan") else "—",
+                    "Talla": tal_ if tal_ not in ("", "nan") else "—",
+                    "Código de barras": comp_bc,
+                    "Cantidad escenario": round(total_qty, 4),
+                })
+
+            sc_results_df = (
+                pd.DataFrame(sc_results)
+                .sort_values(["Nombre", "Color", "Talla"])
+                .reset_index(drop=True)
+            )
+
+            # Compare with active plan if results exist
+            if "results_df" in st.session_state:
+                real_df = st.session_state["results_df"][
+                    ["Código de barras", "Cantidad necesaria"]
+                ].rename(columns={"Cantidad necesaria": "Cantidad plan real"})
+                sc_results_df = sc_results_df.merge(real_df, on="Código de barras", how="left")
+                sc_results_df["Diferencia"] = (
+                    sc_results_df["Cantidad escenario"]
+                    - sc_results_df["Cantidad plan real"].fillna(0)
+                ).round(4)
+
+            st.session_state["sc_results"] = sc_results_df
+
+    if "sc_results" in st.session_state:
+        sc_res = st.session_state["sc_results"]
+        st.subheader("Necesidades de componentes — escenario")
+        st.caption(f"{len(sc_res)} componentes distintos")
+        st.dataframe(sc_res, hide_index=True, use_container_width=True)
+
 
 # ── Auto-save BOM draft to disk on every render ───────────────────────────────
 _save_bom_draft()
