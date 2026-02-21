@@ -1332,6 +1332,159 @@ with tab2:
     comp_label_list = sorted(comp_variants["_label"].unique().tolist())
     comp_label_to_bc = dict(zip(comp_variants["_label"], comp_variants[_bc_col]))
 
+    # ── Apply collection filter if active ────────────────────────────────────
+    if "collection_prenda" in st.session_state:
+        prenda_variants = st.session_state["collection_prenda"]
+        prenda_label_list = sorted(prenda_variants["_label"].unique().tolist())
+        prenda_label_to_bc = dict(zip(prenda_variants["_label"], prenda_variants[_bc_col]))
+        prenda_label_to_tipo = dict(
+            zip(prenda_variants["_label"], prenda_variants["_tipo_prenda"])
+        )
+    if "collection_comp" in st.session_state:
+        comp_variants = st.session_state["collection_comp"]
+        comp_label_list = sorted(comp_variants["_label"].unique().tolist())
+        comp_label_to_bc = dict(zip(comp_variants["_label"], comp_variants[_bc_col]))
+
+    # ── Collection catalog expander ───────────────────────────────────────────
+    _col_active_p = "collection_prenda" in st.session_state
+    _col_active_c = "collection_comp" in st.session_state
+    with st.expander(
+        "Catálogo de colección",
+        expanded=_col_active_p or _col_active_c,
+    ):
+        if _col_active_p or _col_active_c:
+            _info_parts = []
+            if _col_active_p:
+                _info_parts.append(
+                    f"{len(st.session_state['collection_prenda'])} prendas"
+                )
+            if _col_active_c:
+                _info_parts.append(
+                    f"{len(st.session_state['collection_comp'])} componentes"
+                )
+            st.success(
+                f"Colección activa: {' · '.join(_info_parts)}. "
+                "Los selectores muestran solo estos artículos."
+            )
+            if st.button(
+                "Desactivar colección (volver al catálogo completo)",
+                key="btn_deactivate_collection",
+            ):
+                st.session_state.pop("collection_prenda", None)
+                st.session_state.pop("collection_comp", None)
+                st.rerun()
+            st.divider()
+
+        st.markdown(
+            "Carga ficheros reducidos para trabajar exclusivamente con los artículos "
+            "de una colección. Acepta Excel o CSV con al menos una columna de "
+            "**código de barras** o **referencia interna**."
+        )
+
+        _cc1, _cc2 = st.columns(2)
+
+        # ── Finished products ─────────────────────────────────────────────────
+        with _cc1:
+            st.markdown("**Producto terminado**")
+            _up_coll_prenda = st.file_uploader(
+                "Prendas de la colección",
+                type=["xlsx", "csv"],
+                key="upload_coll_prenda",
+                label_visibility="collapsed",
+            )
+            if _up_coll_prenda is not None:
+                if st.button(
+                    "Cargar prendas", key="btn_load_coll_prenda", use_container_width=True
+                ):
+                    try:
+                        if _up_coll_prenda.name.lower().endswith(".csv"):
+                            _df_cp = pd.read_csv(_up_coll_prenda, dtype=str)
+                        else:
+                            _df_cp = pd.read_excel(_up_coll_prenda, dtype=str)
+
+                        _bc_like_p = next(
+                            (c for c in _df_cp.columns
+                             if any(k in c.lower() for k in ("barras", "barcode", "ean"))),
+                            None,
+                        )
+                        _ref_like_p = next(
+                            (c for c in _df_cp.columns
+                             if any(k in c.lower() for k in ("referencia", "ref", "código", "codigo"))),
+                            None,
+                        )
+                        _base_p = all_variants[_is_finished].copy()
+                        if _bc_like_p:
+                            _ids_p = set(_df_cp[_bc_like_p].astype(str).str.strip())
+                            _filt_p = _base_p[_base_p["Código de barras principal"].isin(_ids_p)]
+                        elif _ref_like_p:
+                            _ids_p = set(_df_cp[_ref_like_p].astype(str).str.strip())
+                            _filt_p = _base_p[_base_p["Referencia interna"].isin(_ids_p)]
+                        else:
+                            _ids_p = set(_df_cp.iloc[:, 0].astype(str).str.strip())
+                            _filt_p = _base_p[_base_p["Código de barras principal"].isin(_ids_p)]
+                            if _filt_p.empty:
+                                _filt_p = _base_p[_base_p["Referencia interna"].isin(_ids_p)]
+
+                        if _filt_p.empty:
+                            st.error("No se encontraron prendas reconocibles en el fichero.")
+                        else:
+                            st.session_state["collection_prenda"] = _filt_p.reset_index(drop=True)
+                            st.success(f"{len(_filt_p)} variantes de prenda cargadas.")
+                            st.rerun()
+                    except Exception as _exc:
+                        st.error(f"Error al leer el fichero: {_exc}")
+
+        # ── Components ────────────────────────────────────────────────────────
+        with _cc2:
+            st.markdown("**Componentes / Materiales**")
+            _up_coll_comp = st.file_uploader(
+                "Componentes de la colección",
+                type=["xlsx", "csv"],
+                key="upload_coll_comp",
+                label_visibility="collapsed",
+            )
+            if _up_coll_comp is not None:
+                if st.button(
+                    "Cargar componentes", key="btn_load_coll_comp", use_container_width=True
+                ):
+                    try:
+                        if _up_coll_comp.name.lower().endswith(".csv"):
+                            _df_cc = pd.read_csv(_up_coll_comp, dtype=str)
+                        else:
+                            _df_cc = pd.read_excel(_up_coll_comp, dtype=str)
+
+                        _bc_like_c = next(
+                            (c for c in _df_cc.columns
+                             if any(k in c.lower() for k in ("barras", "barcode", "ean"))),
+                            None,
+                        )
+                        _ref_like_c = next(
+                            (c for c in _df_cc.columns
+                             if any(k in c.lower() for k in ("referencia", "ref", "código", "codigo"))),
+                            None,
+                        )
+                        _base_c = all_variants[~_is_finished].copy()
+                        if _bc_like_c:
+                            _ids_c = set(_df_cc[_bc_like_c].astype(str).str.strip())
+                            _filt_c = _base_c[_base_c["Código de barras principal"].isin(_ids_c)]
+                        elif _ref_like_c:
+                            _ids_c = set(_df_cc[_ref_like_c].astype(str).str.strip())
+                            _filt_c = _base_c[_base_c["Referencia interna"].isin(_ids_c)]
+                        else:
+                            _ids_c = set(_df_cc.iloc[:, 0].astype(str).str.strip())
+                            _filt_c = _base_c[_base_c["Código de barras principal"].isin(_ids_c)]
+                            if _filt_c.empty:
+                                _filt_c = _base_c[_base_c["Referencia interna"].isin(_ids_c)]
+
+                        if _filt_c.empty:
+                            st.error("No se encontraron componentes reconocibles en el fichero.")
+                        else:
+                            st.session_state["collection_comp"] = _filt_c.reset_index(drop=True)
+                            st.success(f"{len(_filt_c)} componentes cargados.")
+                            st.rerun()
+                    except Exception as _exc:
+                        st.error(f"Error al leer el fichero: {_exc}")
+
     # ── Load existing BOM as starting point ──────────────────────────────────
     with st.expander("Cargar BOM existente como base de partida"):
         lc1, lc2 = st.columns(2)
