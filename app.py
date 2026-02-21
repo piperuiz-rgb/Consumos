@@ -167,10 +167,40 @@ def _sz_key(s):
 # ── SIDEBAR — Asistente IA ────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Asistente IA")
-    st.caption("Pregunta o da órdenes: establecer cantidades, consultar BOM, analizar consumos…")
+    st.caption("Pregunta o da órdenes: plan de producción, BOM, consumos…")
 
     if "chat_history" not in st.session_state:
         st.session_state["chat_history"] = []
+
+    # ── Variant / component catalogs for BOM tools ────────────────────────────
+    _sb_all = variantes.dropna(subset=["Código de barras principal"]).copy()
+    _sb_is_fin = (
+        _sb_all["Código de barras principal"].str.len().eq(13)
+        & _sb_all["Código de barras principal"].str.startswith("8445790")
+    )
+    _sb_prendas = _sb_all[_sb_is_fin].copy()   # all finished-product variants
+    _sb_comp    = _sb_all[~_sb_is_fin].copy()   # all component variants
+
+    def _match_prendas(filtro: dict):
+        """Return rows of _sb_prendas matching a garment filter dict."""
+        mask = pd.Series([True] * len(_sb_prendas), index=_sb_prendas.index)
+        if filtro.get("referencia"):
+            mask &= _sb_prendas["Referencia interna"].str.contains(filtro["referencia"], case=False, na=False)
+        if filtro.get("nombre"):
+            mask &= _sb_prendas["Nombre"].str.contains(filtro["nombre"], case=False, na=False)
+        if filtro.get("color"):
+            mask &= _sb_prendas["Color"].str.contains(filtro["color"], case=False, na=False)
+        if filtro.get("talla"):
+            mask &= _sb_prendas["Talla"].str.upper() == str(filtro["talla"]).upper()
+        return _sb_prendas[mask]
+
+    def _match_comp(referencia_o_nombre: str):
+        """Return component rows matching the given string in Referencia interna or Nombre."""
+        m = (
+            _sb_comp["Referencia interna"].str.contains(referencia_o_nombre, case=False, na=False)
+            | _sb_comp["Nombre"].str.contains(referencia_o_nombre, case=False, na=False)
+        )
+        return _sb_comp[m]
 
     # ── Tool definitions ──────────────────────────────────────────────────────
     _ai_tools = [
@@ -214,6 +244,79 @@ with st.sidebar:
                 "parameters": {"type": "object", "properties": {}},
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "add_bom_entries",
+                "description": (
+                    "Añade uno o varios componentes a la BOM en construcción para las prendas "
+                    "que coincidan con el filtro. Si la entrada ya existe puede omitirse o sobreescribirse."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prendas": {
+                            "type": "object",
+                            "description": "Filtro para seleccionar prendas (todos los campos son opcionales)",
+                            "properties": {
+                                "referencia": {"type": "string"},
+                                "nombre":     {"type": "string"},
+                                "color":      {"type": "string"},
+                                "talla":      {"type": "string"},
+                            },
+                        },
+                        "componentes": {
+                            "type": "array",
+                            "description": "Componentes a añadir",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "referencia_o_nombre": {
+                                        "type": "string",
+                                        "description": "Referencia interna o nombre del componente",
+                                    },
+                                    "cantidad":      {"type": "number"},
+                                    "sobreescribir": {"type": "boolean"},
+                                },
+                                "required": ["referencia_o_nombre", "cantidad"],
+                            },
+                        },
+                    },
+                    "required": ["prendas", "componentes"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remove_bom_entries",
+                "description": (
+                    "Elimina entradas de la BOM en construcción para las prendas que "
+                    "coincidan con el filtro. Si se indica un componente solo se elimina ese; "
+                    "si no se indica ninguno se eliminan todos los componentes de las prendas filtradas."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prendas": {
+                            "type": "object",
+                            "description": "Filtro para seleccionar prendas",
+                            "properties": {
+                                "referencia": {"type": "string"},
+                                "nombre":     {"type": "string"},
+                                "color":      {"type": "string"},
+                                "talla":      {"type": "string"},
+                            },
+                        },
+                        "componente": {
+                            "type": "string",
+                            "description": "Nombre o referencia del componente a eliminar (opcional)",
+                        },
+                    },
+                    "required": ["prendas"],
+                },
+            },
+        },
     ]
 
     def _exec_set_quantities(items):
@@ -255,6 +358,70 @@ with st.sidebar:
         st.session_state.pop("results_df", None)
         st.session_state.pop("plan_df", None)
         return "Plan de producción vaciado."
+
+    def _exec_add_bom_entries(prendas: dict, componentes: list):
+        lines = []
+        prenda_matches = _match_prendas(prendas)
+        if prenda_matches.empty:
+            return f"Sin prendas coincidentes con el filtro: {prendas}"
+        for comp_spec in componentes:
+            ron = comp_spec.get("referencia_o_nombre", "")
+            cantidad = float(comp_spec.get("cantidad", 1))
+            sobreescribir = bool(comp_spec.get("sobreescribir", False))
+            comp_matches = _match_comp(ron)
+            if comp_matches.empty:
+                lines.append(f"⚠ Componente no encontrado: '{ron}'")
+                continue
+            # Use the first (best) match
+            comp_row = comp_matches.iloc[0]
+            comp_bc  = comp_row["Código de barras principal"]
+            comp_label = f"{comp_row['Referencia interna']} | {comp_row['Nombre']}"
+            for _, p_row in prenda_matches.iterrows():
+                p_bc = p_row["Código de barras principal"]
+                existing = next(
+                    (i for i, e in enumerate(st.session_state["bom_draft"])
+                     if e["Cod Barras Variante"] == p_bc and e["EAN Componente"] == comp_bc),
+                    None,
+                )
+                p_label = f"{p_row['Referencia interna']} | {p_row['Color']} | {p_row['Talla']}"
+                if existing is not None:
+                    if sobreescribir:
+                        st.session_state["bom_draft"][existing]["Cantidad"] = cantidad
+                        lines.append(f"↺ {p_label} ← {comp_label}: {cantidad} (actualizado)")
+                    else:
+                        lines.append(f"· {p_label} ← {comp_label}: ya existía, omitido")
+                else:
+                    st.session_state["bom_draft"].append({
+                        "Cod Barras Variante":  p_bc,
+                        "EAN Componente":       comp_bc,
+                        "Cantidad":             cantidad,
+                        "_nombre_variante":     f"{p_row['Referencia interna']} | {p_row['Nombre']} | {p_row['Color']} | {p_row['Talla']}",
+                        "_nombre_componente":   f"{comp_row['Referencia interna']} | {comp_row['Nombre']} | {comp_row['Color']} | {comp_row['Talla']}",
+                    })
+                    lines.append(f"✓ {p_label} ← {comp_label}: {cantidad}")
+        return "\n".join(lines) if lines else "No se realizaron cambios."
+
+    def _exec_remove_bom_entries(prendas: dict, componente: str = ""):
+        prenda_matches = _match_prendas(prendas)
+        if prenda_matches.empty:
+            return f"Sin prendas coincidentes con el filtro: {prendas}"
+        p_bcs = set(prenda_matches["Código de barras principal"].tolist())
+        comp_bcs: set = set()
+        if componente:
+            cm = _match_comp(componente)
+            if cm.empty:
+                return f"Componente no encontrado: '{componente}'"
+            comp_bcs = set(cm["Código de barras principal"].tolist())
+        before = len(st.session_state["bom_draft"])
+        st.session_state["bom_draft"] = [
+            e for e in st.session_state["bom_draft"]
+            if not (
+                e["Cod Barras Variante"] in p_bcs
+                and (not comp_bcs or e["EAN Componente"] in comp_bcs)
+            )
+        ]
+        removed = before - len(st.session_state["bom_draft"])
+        return f"Eliminadas {removed} entradas de la BOM en construcción."
 
     # ── Chat display ──────────────────────────────────────────────────────────
     for msg in st.session_state["chat_history"]:
@@ -310,12 +477,28 @@ with st.sidebar:
             )
 
         # Catalog summary for the model to match user intent
-        _refs_list = sorted(finished["Referencia interna"].dropna().unique().tolist())
-        _colors_list = sorted(finished["Color"].dropna().unique().tolist())
-        _tallas_list = sorted(finished["Talla"].dropna().unique().tolist(), key=_sz_key)
-        _ctx_parts.append(f"Referencias disponibles: {', '.join(_refs_list[:40])}{'…' if len(_refs_list) > 40 else ''}.")
-        _ctx_parts.append(f"Colores disponibles: {', '.join(_colors_list[:30])}{'…' if len(_colors_list) > 30 else ''}.")
+        _refs_list   = sorted(_sb_prendas["Referencia interna"].dropna().unique().tolist())
+        _colors_list = sorted(_sb_prendas["Color"].dropna().unique().tolist())
+        _tallas_list = sorted(_sb_prendas["Talla"].dropna().unique().tolist(), key=_sz_key)
+        _comp_labels = sorted(
+            (_sb_comp["Referencia interna"].fillna("") + " | " + _sb_comp["Nombre"].fillna(""))
+            .str.strip(" |").unique().tolist()
+        )
+        _ctx_parts.append(f"Referencias de prenda disponibles: {', '.join(_refs_list[:40])}{'…' if len(_refs_list)>40 else ''}.")
+        _ctx_parts.append(f"Colores disponibles: {', '.join(_colors_list[:30])}{'…' if len(_colors_list)>30 else ''}.")
         _ctx_parts.append(f"Tallas disponibles: {', '.join(_tallas_list)}.")
+        _ctx_parts.append(f"Componentes del catálogo: {', '.join(_comp_labels[:50])}{'…' if len(_comp_labels)>50 else ''}.")
+
+        # BOM draft detail
+        _draft_detail = st.session_state.get("bom_draft", [])
+        if _draft_detail:
+            _draft_by_prenda = {}
+            for _e in _draft_detail:
+                _draft_by_prenda.setdefault(_e["_nombre_variante"], []).append(_e["_nombre_componente"])
+            _draft_summary = "; ".join(
+                f"{k[:30]} ({len(v)} comp.)" for k, v in list(_draft_by_prenda.items())[:10]
+            )
+            _ctx_parts.append(f"BOM en construcción detalle: {_draft_summary}{'…' if len(_draft_by_prenda)>10 else ''}.")
 
         _context_block = "\n".join(f"- {p}" for p in _ctx_parts)
 
@@ -326,9 +509,12 @@ acciones sobre la aplicación usando las funciones disponibles.
 Estado actual de la aplicación:
 {_context_block}
 
-Responde siempre en español, de forma concisa. Cuando el usuario pida establecer cantidades \
-de producción, usa la función set_production_quantities. Cuando pida vaciar o limpiar el plan, \
-usa clear_production_plan. Para preguntas informativas, responde directamente sin usar funciones."""
+Responde siempre en español, de forma concisa.
+- Para establecer cantidades de producción → set_production_quantities
+- Para vaciar el plan → clear_production_plan
+- Para añadir componentes a la BOM en construcción → add_bom_entries
+- Para eliminar componentes de la BOM en construcción → remove_bom_entries
+- Para preguntas informativas → responde directamente sin funciones"""
 
         _messages_api = [{"role": "system", "content": _system_prompt}]
         _messages_api += [
@@ -360,6 +546,16 @@ usa clear_production_plan. Para preguntas informativas, responde directamente si
                         _tr = _exec_set_quantities(_args.get("items", []))
                     elif _tc.function.name == "clear_production_plan":
                         _tr = _exec_clear_plan()
+                    elif _tc.function.name == "add_bom_entries":
+                        _tr = _exec_add_bom_entries(
+                            _args.get("prendas", {}),
+                            _args.get("componentes", []),
+                        )
+                    elif _tc.function.name == "remove_bom_entries":
+                        _tr = _exec_remove_bom_entries(
+                            _args.get("prendas", {}),
+                            _args.get("componente", ""),
+                        )
                     else:
                         _tr = "Función desconocida."
                     _tool_results.append({"tool_call_id": _tc.id, "result": _tr})
