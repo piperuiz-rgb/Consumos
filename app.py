@@ -624,6 +624,183 @@ with tab2:
 
     st.divider()
 
+    # ── Bulk component assignment ─────────────────────────────────────────────
+    with st.expander("Asignación masiva de componentes", expanded=False):
+        st.markdown(
+            "Aplica el mismo componente a múltiples prendas a la vez. "
+            "Filtra por referencia, nombre, color o talla para definir el grupo objetivo."
+        )
+
+        # ── Step 1: target selection ──────────────────────────────────────────
+        st.markdown("**Paso 1 — Seleccionar prendas objetivo**")
+        bf1, bf2 = st.columns(2)
+        with bf1:
+            bulk_refs = st.multiselect(
+                "Referencia interna",
+                sorted(all_variants["Referencia interna"].dropna().unique().tolist()),
+                placeholder="Todas las referencias",
+                key="bulk_refs",
+            )
+            bulk_q = st.text_input(
+                "Buscar por nombre",
+                placeholder="ej. Vestido Goya…",
+                key="bulk_q",
+            )
+        with bf2:
+            bulk_colors = st.multiselect(
+                "Color",
+                sorted(all_variants["Color"].dropna().unique().tolist()),
+                placeholder="Todos los colores",
+                key="bulk_colors",
+            )
+            bulk_tallas = st.multiselect(
+                "Talla",
+                sorted(all_variants["Talla"].dropna().unique().tolist(), key=_sz_key),
+                placeholder="Todas las tallas",
+                key="bulk_tallas",
+            )
+
+        # Apply filters
+        bulk_target = all_variants.copy()
+        if bulk_refs:
+            bulk_target = bulk_target[bulk_target["Referencia interna"].isin(bulk_refs)]
+        if bulk_q:
+            bulk_target = bulk_target[
+                bulk_target["Nombre"].str.contains(bulk_q, case=False, na=False)
+            ]
+        if bulk_colors:
+            bulk_target = bulk_target[bulk_target["Color"].isin(bulk_colors)]
+        if bulk_tallas:
+            bulk_target = bulk_target[bulk_target["Talla"].isin(bulk_tallas)]
+
+        n_target = len(bulk_target)
+        st.caption(f"**{n_target}** prendas seleccionadas")
+        if n_target > 0 and n_target <= 30:
+            st.dataframe(
+                bulk_target[["Referencia interna", "Nombre", "Color", "Talla"]]
+                .reset_index(drop=True),
+                hide_index=True,
+                use_container_width=True,
+                height=min(38 * n_target + 38, 300),
+            )
+        elif n_target > 30:
+            st.caption(
+                f"Demasiadas filas para previsualizar — "
+                f"se asignará el componente a las {n_target} prendas filtradas."
+            )
+
+        st.markdown("**Paso 2 — Componente a asignar**")
+        bc1, bc2, bc3, bc4 = st.columns([2.5, 2.5, 1.2, 1.5])
+
+        with bc1:
+            bulk_comp_source = st.radio(
+                "Origen",
+                ["Del catálogo", "EAN manual"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="bulk_comp_source",
+            )
+            if bulk_comp_source == "Del catálogo":
+                bulk_sel_comp = st.selectbox(
+                    "Componente del catálogo",
+                    options=variant_label_list,
+                    label_visibility="collapsed",
+                    key="bulk_sel_comp",
+                )
+                bulk_comp_ean = variant_label_to_bc.get(bulk_sel_comp, "")
+                bulk_comp_name = bulk_sel_comp
+            else:
+                bulk_comp_ean = st.text_input(
+                    "EAN del componente",
+                    placeholder="ej. 8412345678901",
+                    key="bulk_comp_ean",
+                )
+                bulk_comp_name = st.text_input(
+                    "Nombre del componente",
+                    placeholder="ej. Tejido principal",
+                    key="bulk_comp_name",
+                )
+
+        with bc2:
+            st.markdown("Cantidad por unidad")
+            bulk_qty = st.number_input(
+                "Cantidad",
+                min_value=0.001,
+                step=0.1,
+                value=1.0,
+                key="bulk_qty",
+                label_visibility="collapsed",
+                format="%.3f",
+            )
+
+        with bc3:
+            st.markdown("Si ya existe")
+            bulk_dup = st.radio(
+                "Si ya existe",
+                ["Omitir", "Sobreescribir"],
+                key="bulk_dup",
+                label_visibility="collapsed",
+            )
+
+        with bc4:
+            st.write("")
+            st.write("")
+            bulk_assign = st.button(
+                f"Asignar a {n_target} prenda{'s' if n_target != 1 else ''}",
+                type="primary",
+                use_container_width=True,
+                key="bulk_assign",
+                disabled=(n_target == 0),
+            )
+
+        if bulk_assign:
+            if not str(bulk_comp_ean).strip():
+                st.error("El EAN del componente no puede estar vacío.")
+            else:
+                added = 0
+                updated = 0
+                skipped = 0
+                comp_ean_clean = str(bulk_comp_ean).strip()
+                comp_name_final = bulk_comp_name or comp_ean_clean
+
+                for _, var_row in bulk_target.iterrows():
+                    bc_var = var_row["Código de barras principal"]
+                    existing_idx = next(
+                        (
+                            i for i, e in enumerate(st.session_state["bom_draft"])
+                            if e["Cod Barras Variante"] == bc_var
+                            and e["EAN Componente"] == comp_ean_clean
+                        ),
+                        None,
+                    )
+                    if existing_idx is not None:
+                        if bulk_dup == "Sobreescribir":
+                            st.session_state["bom_draft"][existing_idx]["Cantidad"] = bulk_qty
+                            updated += 1
+                        else:
+                            skipped += 1
+                    else:
+                        st.session_state["bom_draft"].append({
+                            "Cod Barras Variante": bc_var,
+                            "EAN Componente": comp_ean_clean,
+                            "Cantidad": bulk_qty,
+                            "_nombre_variante": var_row["_label"],
+                            "_nombre_componente": comp_name_final,
+                        })
+                        added += 1
+
+                parts = []
+                if added:
+                    parts.append(f"{added} añadidas")
+                if updated:
+                    parts.append(f"{updated} actualizadas")
+                if skipped:
+                    parts.append(f"{skipped} omitidas (ya existían)")
+                st.success(f"Asignación completada: {', '.join(parts)}.")
+                st.rerun()
+
+    st.divider()
+
     # ── BOM table ────────────────────────────────────────────────────────────
     st.subheader("BOM en construcción")
 
