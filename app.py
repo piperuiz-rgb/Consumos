@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+from datetime import date
 import os
 
 st.set_page_config(
@@ -400,7 +401,7 @@ with tab1:
         st.dataframe(plan_df, hide_index=True, use_container_width=True)
 
         st.subheader("Descargar resultados")
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
             st.download_button(
                 "Descargar consumos CSV",
@@ -418,6 +419,29 @@ with tab1:
                 "Descargar Excel completo",
                 buf.getvalue(),
                 "consumos.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        with c3:
+            hoy = date.today()
+            pet_df = pd.DataFrame([
+                {
+                    "Fecha": hoy,
+                    "Almacén de origen": "PET Almacén Ibiza",
+                    "Almacén de destino": "PET Almacén Túnez",
+                    "Observaciones": "",
+                    "EAN": row["Código de barras"],
+                    "Cantidad": row["Cantidad necesaria"],
+                }
+                for _, row in results_df.iterrows()
+            ])
+            buf_pet = BytesIO()
+            with pd.ExcelWriter(buf_pet, engine="openpyxl") as writer:
+                pet_df.to_excel(writer, sheet_name="Fichero ejemplo", index=False)
+            st.download_button(
+                "Descargar plantilla PET",
+                buf_pet.getvalue(),
+                f"PET_{hoy.strftime('%Y%m%d')}.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
