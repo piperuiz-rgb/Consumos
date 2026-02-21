@@ -745,11 +745,36 @@ with tab2:
     with st.expander("Asignación masiva de componentes", expanded=False):
         st.markdown(
             "Aplica el mismo componente a múltiples prendas a la vez. "
-            "Filtra por referencia, nombre, color o talla para definir el grupo objetivo."
+            "Filtra por **prefijo EAN** (colección) o por referencia, nombre, color o talla."
         )
 
         # ── Step 1: target selection ──────────────────────────────────────────
         st.markdown("**Paso 1 — Seleccionar prendas objetivo**")
+
+        # Primary: EAN prefix (collection selector)
+        _pfx_c1, _pfx_c2 = st.columns([2, 3])
+        with _pfx_c1:
+            bulk_ean_prefix = st.text_input(
+                "Prefijo del código de barras (colección)",
+                placeholder="ej. 261 o 844579…",
+                key="bulk_ean_prefix",
+                help=(
+                    "Los primeros dígitos del EAN identifican la colección. "
+                    "Ej.: 261 → V&G 2026, 844579 → Ibiza."
+                ),
+            )
+        with _pfx_c2:
+            if bulk_ean_prefix:
+                _pfx_preview = all_variants[
+                    all_variants["Código de barras principal"]
+                    .astype(str)
+                    .str.startswith(bulk_ean_prefix.strip())
+                ]
+                st.caption(
+                    f"{len(_pfx_preview)} variantes cuyo EAN comienza por **{bulk_ean_prefix.strip()}**"
+                )
+
+        st.markdown("— o filtra por atributos —")
         bf1, bf2 = st.columns(2)
         with bf1:
             bulk_refs = st.multiselect(
@@ -779,6 +804,12 @@ with tab2:
 
         # Apply filters
         bulk_target = all_variants.copy()
+        if bulk_ean_prefix:
+            bulk_target = bulk_target[
+                bulk_target["Código de barras principal"]
+                .astype(str)
+                .str.startswith(bulk_ean_prefix.strip())
+            ]
         if bulk_refs:
             bulk_target = bulk_target[bulk_target["Referencia interna"].isin(bulk_refs)]
         if bulk_q:
