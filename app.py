@@ -140,264 +140,578 @@ def _sz_key(s):
         return (2, 0, str(s))
 
 
-# ── SECTION 1 — Filters ──────────────────────────────────────────────────────
-st.header("1. Plan de producción")
-st.markdown(
-    "Filtra las referencias e introduce las unidades a fabricar. "
-    "Usa la **asignación masiva** para rellenar rangos completos de talla o color."
-)
-
-col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
-with col1:
-    q = st.text_input("Buscar por nombre", placeholder="ej. Vestido Goya…")
-with col2:
-    sel_color = st.selectbox(
-        "Color", ["Todos"] + sorted(finished["Color"].dropna().unique().tolist())
-    )
-with col3:
-    sel_talla = st.selectbox(
-        "Talla",
-        ["Todas"] + sorted(finished["Talla"].dropna().unique().tolist(), key=_sz_key),
-    )
-with col4:
-    sel_ref = st.selectbox(
-        "Referencia",
-        ["Todas"] + sorted(finished["Referencia interna"].dropna().unique().tolist()),
-    )
-
-df = finished.copy()
-if q:
-    df = df[df["Nombre"].str.contains(q, case=False, na=False)]
-if sel_color != "Todos":
-    df = df[df["Color"] == sel_color]
-if sel_talla != "Todas":
-    df = df[df["Talla"] == sel_talla]
-if sel_ref != "Todas":
-    df = df[df["Referencia interna"] == sel_ref]
-
-st.caption(f"{len(df)} variantes mostradas")
+# ── TABS ─────────────────────────────────────────────────────────────────────
+tab1, tab2 = st.tabs(["Plan de producción", "Crear / Editar BOM"])
 
 
-# ── Bulk assignment ───────────────────────────────────────────────────────────
-def _bulk_apply(target_df, delta):
-    """delta=int → add/subtract; delta=None → reset to 0."""
-    for bc in target_df["Código de barras principal"]:
-        sk = f"qty_{bc}"
-        cur = st.session_state.get(sk, 0)
-        st.session_state[sk] = 0 if delta is None else max(0, cur + delta)
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — Plan de producción + Cálculo de consumos
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab1:
 
-
-with st.expander("Asignación masiva por talla / color", expanded=False):
-    mc1, mc2 = st.columns(2)
-    with mc1:
-        bulk_tallas = st.multiselect(
-            "Filtrar por talla",
-            sorted(df["Talla"].dropna().unique().tolist(), key=_sz_key),
-            placeholder="Todas las tallas visibles",
-        )
-    with mc2:
-        bulk_colors = st.multiselect(
-            "Filtrar por color",
-            sorted(df["Color"].dropna().unique().tolist()),
-            placeholder="Todos los colores visibles",
+    # Indicator when a custom BOM is active
+    if st.session_state.get("custom_bom") is not None:
+        n_lines = len(st.session_state["custom_bom"])
+        st.info(
+            f"BOM personalizada activa ({n_lines} entradas). "
+            "El cálculo usará esta BOM en lugar de la BOM por defecto. "
+            "Ve a la pestaña 'Crear / Editar BOM' para modificarla o desactivarla."
         )
 
-    sub_bulk = df.copy()
-    if bulk_tallas:
-        sub_bulk = sub_bulk[sub_bulk["Talla"].isin(bulk_tallas)]
-    if bulk_colors:
-        sub_bulk = sub_bulk[sub_bulk["Color"].isin(bulk_colors)]
-    st.caption(f"Afecta a **{len(sub_bulk)}** de {len(df)} variantes visibles")
-
-    bc1, bc2, bc3, _s, bc4, bc5, bc6, _s2, bc7 = st.columns(
-        [1, 1, 1, 0.3, 1, 1, 1, 0.3, 1.4]
-    )
-    if bc1.button("− 10", use_container_width=True):
-        _bulk_apply(sub_bulk, -10)
-    if bc2.button("− 5", use_container_width=True):
-        _bulk_apply(sub_bulk, -5)
-    if bc3.button("− 1", use_container_width=True):
-        _bulk_apply(sub_bulk, -1)
-    if bc4.button("+ 1", use_container_width=True):
-        _bulk_apply(sub_bulk, 1)
-    if bc5.button("+ 5", use_container_width=True):
-        _bulk_apply(sub_bulk, 5)
-    if bc6.button("+ 10", use_container_width=True):
-        _bulk_apply(sub_bulk, 10)
-    if bc7.button("Poner a 0", use_container_width=True):
-        _bulk_apply(sub_bulk, None)
-
-# Placeholder filled after matrix so totals reflect current state
-summary_slot = st.empty()
-
-# ── Matrix view ──────────────────────────────────────────────────────────────
-for (ref, nombre), grp in df.groupby(["Referencia interna", "Nombre"], sort=True):
-    colors = sorted(grp["Color"].dropna().unique().tolist())
-    tallas = sorted(grp["Talla"].dropna().unique().tolist(), key=_sz_key)
-
-    bc_map = {
-        (r["Color"], r["Talla"]): r["Código de barras principal"]
-        for _, r in grp.iterrows()
-    }
-
-    # Gray reference card
-    st.markdown(
-        f'<div class="ref-card">'
-        f'<span class="ref-title">{ref} &nbsp;·&nbsp; {nombre}</span>'
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-    # ratios: [talla label] + [one per color] + [total col]
-    ratios = [0.8] + [2.5] * len(colors) + [1.0]
-
-    # Header row
-    hcols = st.columns(ratios)
-    hcols[0].write("")
-    for ci, color in enumerate(colors):
-        hcols[ci + 1].markdown(
-            f'<div class="col-hdr">{color}</div>', unsafe_allow_html=True
-        )
-    hcols[-1].markdown('<div class="col-hdr-tot">Total</div>', unsafe_allow_html=True)
-
-    col_totals = [0] * len(colors)
-
-    # One row per size
-    for talla in tallas:
-        rcols = st.columns(ratios)
-        rcols[0].markdown(f'<div class="sz-lbl">{talla}</div>', unsafe_allow_html=True)
-        row_total = 0
-
-        for ci, color in enumerate(colors):
-            bc = bc_map.get((color, talla))
-            if bc is None:
-                continue
+    # ── Bulk assignment helper ────────────────────────────────────────────────
+    def _bulk_apply(target_df, delta):
+        """delta=int → add/subtract; delta=None → reset to 0."""
+        for bc in target_df["Código de barras principal"]:
             sk = f"qty_{bc}"
-            if sk not in st.session_state:
-                st.session_state[sk] = 0
-            with rcols[ci + 1]:
-                v = st.number_input(
-                    talla,
-                    min_value=0,
-                    step=1,
-                    key=sk,
-                    label_visibility="collapsed",
-                )
-            row_total += int(v)
-            col_totals[ci] += int(v)
+            cur = st.session_state.get(sk, 0)
+            st.session_state[sk] = 0 if delta is None else max(0, cur + delta)
 
-        cls = "tot-val" if row_total > 0 else "tot-zero"
-        rcols[-1].markdown(
-            f'<div class="{cls}">{row_total if row_total > 0 else "—"}</div>',
+    # ── SECTION 1 — Filters ──────────────────────────────────────────────────
+    st.header("1. Plan de producción")
+    st.markdown(
+        "Filtra las referencias e introduce las unidades a fabricar. "
+        "Usa la **asignación masiva** para rellenar rangos completos de talla o color."
+    )
+
+    col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
+    with col1:
+        q = st.text_input("Buscar por nombre", placeholder="ej. Vestido Goya…")
+    with col2:
+        sel_color = st.selectbox(
+            "Color", ["Todos"] + sorted(finished["Color"].dropna().unique().tolist())
+        )
+    with col3:
+        sel_talla = st.selectbox(
+            "Talla",
+            ["Todas"] + sorted(finished["Talla"].dropna().unique().tolist(), key=_sz_key),
+        )
+    with col4:
+        sel_ref = st.selectbox(
+            "Referencia",
+            ["Todas"] + sorted(finished["Referencia interna"].dropna().unique().tolist()),
+        )
+
+    df = finished.copy()
+    if q:
+        df = df[df["Nombre"].str.contains(q, case=False, na=False)]
+    if sel_color != "Todos":
+        df = df[df["Color"] == sel_color]
+    if sel_talla != "Todas":
+        df = df[df["Talla"] == sel_talla]
+    if sel_ref != "Todas":
+        df = df[df["Referencia interna"] == sel_ref]
+
+    st.caption(f"{len(df)} variantes mostradas")
+
+    # ── Bulk assignment ───────────────────────────────────────────────────────
+    with st.expander("Asignación masiva por talla / color", expanded=False):
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            bulk_tallas = st.multiselect(
+                "Filtrar por talla",
+                sorted(df["Talla"].dropna().unique().tolist(), key=_sz_key),
+                placeholder="Todas las tallas visibles",
+            )
+        with mc2:
+            bulk_colors = st.multiselect(
+                "Filtrar por color",
+                sorted(df["Color"].dropna().unique().tolist()),
+                placeholder="Todos los colores visibles",
+            )
+
+        sub_bulk = df.copy()
+        if bulk_tallas:
+            sub_bulk = sub_bulk[sub_bulk["Talla"].isin(bulk_tallas)]
+        if bulk_colors:
+            sub_bulk = sub_bulk[sub_bulk["Color"].isin(bulk_colors)]
+        st.caption(f"Afecta a **{len(sub_bulk)}** de {len(df)} variantes visibles")
+
+        bc1, bc2, bc3, _s, bc4, bc5, bc6, _s2, bc7 = st.columns(
+            [1, 1, 1, 0.3, 1, 1, 1, 0.3, 1.4]
+        )
+        if bc1.button("− 10", use_container_width=True):
+            _bulk_apply(sub_bulk, -10)
+        if bc2.button("− 5", use_container_width=True):
+            _bulk_apply(sub_bulk, -5)
+        if bc3.button("− 1", use_container_width=True):
+            _bulk_apply(sub_bulk, -1)
+        if bc4.button("+ 1", use_container_width=True):
+            _bulk_apply(sub_bulk, 1)
+        if bc5.button("+ 5", use_container_width=True):
+            _bulk_apply(sub_bulk, 5)
+        if bc6.button("+ 10", use_container_width=True):
+            _bulk_apply(sub_bulk, 10)
+        if bc7.button("Poner a 0", use_container_width=True):
+            _bulk_apply(sub_bulk, None)
+
+    # Placeholder filled after matrix so totals reflect current state
+    summary_slot = st.empty()
+
+    # ── Matrix view ──────────────────────────────────────────────────────────
+    for (ref, nombre), grp in df.groupby(["Referencia interna", "Nombre"], sort=True):
+        colors = sorted(grp["Color"].dropna().unique().tolist())
+        tallas = sorted(grp["Talla"].dropna().unique().tolist(), key=_sz_key)
+
+        bc_map = {
+            (r["Color"], r["Talla"]): r["Código de barras principal"]
+            for _, r in grp.iterrows()
+        }
+
+        # Gray reference card
+        st.markdown(
+            f'<div class="ref-card">'
+            f'<span class="ref-title">{ref} &nbsp;·&nbsp; {nombre}</span>'
+            f"</div>",
             unsafe_allow_html=True,
         )
 
-    # Totals row
-    tcols = st.columns(ratios)
-    tcols[0].markdown('<div class="tot-lbl">Total</div>', unsafe_allow_html=True)
-    grand = sum(col_totals)
-    for ci, ct in enumerate(col_totals):
-        cls = "tot-val" if ct > 0 else "tot-zero"
-        tcols[ci + 1].markdown(
-            f'<div class="{cls}">{ct if ct > 0 else "—"}</div>',
+        # ratios: [talla label] + [one per color] + [total col]
+        ratios = [0.8] + [2.5] * len(colors) + [1.0]
+
+        # Header row
+        hcols = st.columns(ratios)
+        hcols[0].write("")
+        for ci, color in enumerate(colors):
+            hcols[ci + 1].markdown(
+                f'<div class="col-hdr">{color}</div>', unsafe_allow_html=True
+            )
+        hcols[-1].markdown('<div class="col-hdr-tot">Total</div>', unsafe_allow_html=True)
+
+        col_totals = [0] * len(colors)
+
+        # One row per size
+        for talla in tallas:
+            rcols = st.columns(ratios)
+            rcols[0].markdown(f'<div class="sz-lbl">{talla}</div>', unsafe_allow_html=True)
+            row_total = 0
+
+            for ci, color in enumerate(colors):
+                bc = bc_map.get((color, talla))
+                if bc is None:
+                    continue
+                sk = f"qty_{bc}"
+                if sk not in st.session_state:
+                    st.session_state[sk] = 0
+                with rcols[ci + 1]:
+                    v = st.number_input(
+                        talla,
+                        min_value=0,
+                        step=1,
+                        key=sk,
+                        label_visibility="collapsed",
+                    )
+                row_total += int(v)
+                col_totals[ci] += int(v)
+
+            cls = "tot-val" if row_total > 0 else "tot-zero"
+            rcols[-1].markdown(
+                f'<div class="{cls}">{row_total if row_total > 0 else "—"}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Totals row
+        tcols = st.columns(ratios)
+        tcols[0].markdown('<div class="tot-lbl">Total</div>', unsafe_allow_html=True)
+        grand = sum(col_totals)
+        for ci, ct in enumerate(col_totals):
+            cls = "tot-val" if ct > 0 else "tot-zero"
+            tcols[ci + 1].markdown(
+                f'<div class="{cls}">{ct if ct > 0 else "—"}</div>',
+                unsafe_allow_html=True,
+            )
+        tcols[-1].markdown(
+            f'<div class="grand-tot">{grand if grand > 0 else "—"}</div>',
             unsafe_allow_html=True,
         )
-    tcols[-1].markdown(
-        f'<div class="grand-tot">{grand if grand > 0 else "—"}</div>',
-        unsafe_allow_html=True,
-    )
 
-# Fill summary after all inputs are rendered (values are now current)
-fresh_qtys = {
-    k[4:]: int(v)
-    for k, v in st.session_state.items()
-    if k.startswith("qty_") and isinstance(v, (int, float)) and v > 0
-}
-if fresh_qtys:
-    summary_slot.info(
-        f"**{len(fresh_qtys)}** variantes con cantidad asignada — "
-        f"**{sum(fresh_qtys.values())}** unidades totales"
-    )
-
-st.divider()
-
-# ── SECTION 2 — Calculate ────────────────────────────────────────────────────
-if st.button("Calcular Consumos", type="primary", use_container_width=True):
-    final_qtys = {
+    # Fill summary after all inputs are rendered (values are now current)
+    fresh_qtys = {
         k[4:]: int(v)
         for k, v in st.session_state.items()
         if k.startswith("qty_") and isinstance(v, (int, float)) and v > 0
     }
-    if not final_qtys:
-        st.warning("Introduce la cantidad a producir en al menos una variante.")
-        st.stop()
-
-    comp_totals: dict[str, float] = {}
-    for bc, qty in final_qtys.items():
-        for _, brow in bom[bom["Cod Barras Variante"] == bc].iterrows():
-            comp = str(brow["EAN Componente"])
-            comp_totals[comp] = comp_totals.get(comp, 0.0) + float(brow["Cantidad"]) * qty
-
-    results = []
-    for comp_bc, total_qty in comp_totals.items():
-        info = barcode_lookup.get(comp_bc, {})
-        col_ = str(info.get("Color", "")).strip()
-        tal_ = str(info.get("Talla", "")).strip()
-        results.append(
-            {
-                "Referencia": info.get("Referencia interna", ""),
-                "Nombre": info.get("Nombre", f"Componente {comp_bc}"),
-                "Color": col_ if col_ not in ("", "nan") else "—",
-                "Talla": tal_ if tal_ not in ("", "nan") else "—",
-                "Código de barras": comp_bc,
-                "Cantidad necesaria": round(total_qty, 4),
-            }
+    if fresh_qtys:
+        summary_slot.info(
+            f"**{len(fresh_qtys)}** variantes con cantidad asignada — "
+            f"**{sum(fresh_qtys.values())}** unidades totales"
         )
 
-    results_df = (
-        pd.DataFrame(results).sort_values(["Nombre", "Color", "Talla"]).reset_index(drop=True)
+    st.divider()
+
+    # ── SECTION 2 — Calculate ────────────────────────────────────────────────
+    if st.button("Calcular Consumos", type="primary", use_container_width=True):
+        final_qtys = {
+            k[4:]: int(v)
+            for k, v in st.session_state.items()
+            if k.startswith("qty_") and isinstance(v, (int, float)) and v > 0
+        }
+        if not final_qtys:
+            st.warning("Introduce la cantidad a producir en al menos una variante.")
+            st.stop()
+
+        # Use custom BOM if active, otherwise use default
+        active_bom = st.session_state.get("custom_bom", bom)
+
+        comp_totals: dict[str, float] = {}
+        for bc, qty in final_qtys.items():
+            for _, brow in active_bom[active_bom["Cod Barras Variante"] == bc].iterrows():
+                comp = str(brow["EAN Componente"])
+                comp_totals[comp] = comp_totals.get(comp, 0.0) + float(brow["Cantidad"]) * qty
+
+        results = []
+        for comp_bc, total_qty in comp_totals.items():
+            info = barcode_lookup.get(comp_bc, {})
+            col_ = str(info.get("Color", "")).strip()
+            tal_ = str(info.get("Talla", "")).strip()
+            results.append(
+                {
+                    "Referencia": info.get("Referencia interna", ""),
+                    "Nombre": info.get("Nombre", f"Componente {comp_bc}"),
+                    "Color": col_ if col_ not in ("", "nan") else "—",
+                    "Talla": tal_ if tal_ not in ("", "nan") else "—",
+                    "Código de barras": comp_bc,
+                    "Cantidad necesaria": round(total_qty, 4),
+                }
+            )
+
+        results_df = (
+            pd.DataFrame(results).sort_values(["Nombre", "Color", "Talla"]).reset_index(drop=True)
+        )
+
+        st.header("2. Necesidades de componentes")
+        st.caption(f"{len(results_df)} componentes distintos necesarios para fabricar la colección")
+        st.dataframe(results_df, hide_index=True, use_container_width=True)
+
+        st.subheader("Resumen del plan de producción")
+        plan_rows = []
+        for bc, qty in final_qtys.items():
+            info = barcode_lookup.get(bc, {})
+            plan_rows.append(
+                {
+                    "Referencia": info.get("Referencia interna", ""),
+                    "Nombre": info.get("Nombre", ""),
+                    "Color": info.get("Color", ""),
+                    "Talla": info.get("Talla", ""),
+                    "Código de barras": bc,
+                    "Unidades": qty,
+                }
+            )
+        plan_df = pd.DataFrame(plan_rows).sort_values(["Nombre", "Color", "Talla"])
+        st.dataframe(plan_df, hide_index=True, use_container_width=True)
+
+        st.subheader("Descargar resultados")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button(
+                "Descargar consumos CSV",
+                results_df.to_csv(index=False).encode("utf-8-sig"),
+                "consumos.csv",
+                "text/csv",
+                use_container_width=True,
+            )
+        with c2:
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                plan_df.to_excel(writer, sheet_name="Plan de producción", index=False)
+                results_df.to_excel(writer, sheet_name="Consumos", index=False)
+            st.download_button(
+                "Descargar Excel completo",
+                buf.getvalue(),
+                "consumos.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Crear / Editar BOM
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab2:
+    st.header("Crear / Editar Lista de Materiales")
+    st.markdown(
+        "Define los componentes que lleva cada variante de prenda para construir "
+        "tu propia lista de materiales (BOM) desde cero. "
+        "Una vez completa, actívala para usarla en el cálculo de consumos."
     )
 
-    st.header("2. Necesidades de componentes")
-    st.caption(f"{len(results_df)} componentes distintos necesarios para fabricar la colección")
-    st.dataframe(results_df, hide_index=True, use_container_width=True)
+    # Initialize BOM draft in session state
+    if "bom_draft" not in st.session_state:
+        st.session_state["bom_draft"] = []
 
-    st.subheader("Resumen del plan de producción")
-    plan_rows = []
-    for bc, qty in final_qtys.items():
-        info = barcode_lookup.get(bc, {})
-        plan_rows.append(
-            {
-                "Referencia": info.get("Referencia interna", ""),
-                "Nombre": info.get("Nombre", ""),
-                "Color": info.get("Color", ""),
-                "Talla": info.get("Talla", ""),
-                "Código de barras": bc,
-                "Unidades": qty,
-            }
-        )
-    plan_df = pd.DataFrame(plan_rows).sort_values(["Nombre", "Color", "Talla"])
-    st.dataframe(plan_df, hide_index=True, use_container_width=True)
+    # ── Build variant option lists ────────────────────────────────────────────
+    all_variants = variantes.dropna(subset=["Código de barras principal"]).copy()
+    all_variants["_label"] = (
+        all_variants["Referencia interna"].fillna("").str.strip()
+        + " | "
+        + all_variants["Nombre"].fillna("").str.strip()
+        + " | "
+        + all_variants["Color"].fillna("").str.strip()
+        + " | "
+        + all_variants["Talla"].fillna("").str.strip()
+    )
+    variant_label_list = sorted(all_variants["_label"].unique().tolist())
+    variant_label_to_bc = dict(
+        zip(all_variants["_label"], all_variants["Código de barras principal"])
+    )
 
-    st.subheader("Descargar resultados")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.download_button(
-            "Descargar consumos CSV",
-            results_df.to_csv(index=False).encode("utf-8-sig"),
-            "consumos.csv",
-            "text/csv",
-            use_container_width=True,
+    # ── Load existing BOM as starting point ──────────────────────────────────
+    with st.expander("Cargar BOM existente como base de partida"):
+        lc1, lc2 = st.columns(2)
+
+        with lc1:
+            st.markdown("**Cargar la BOM por defecto** (`listamateriales.xlsx`)")
+            if st.button("Cargar BOM por defecto", use_container_width=True):
+                entries = []
+                for _, row in bom.iterrows():
+                    bc_var = str(row["Cod Barras Variante"])
+                    bc_comp = str(row["EAN Componente"])
+                    qty = float(row["Cantidad"])
+                    var_info = barcode_lookup.get(bc_var, {})
+                    comp_info = barcode_lookup.get(bc_comp, {})
+                    var_label = " | ".join(
+                        x for x in [
+                            str(var_info.get("Referencia interna", "")).strip(),
+                            str(var_info.get("Nombre", bc_var)).strip(),
+                            str(var_info.get("Color", "")).strip(),
+                            str(var_info.get("Talla", "")).strip(),
+                        ] if x and x != "nan"
+                    ) or bc_var
+                    comp_label = " | ".join(
+                        x for x in [
+                            str(comp_info.get("Referencia interna", "")).strip(),
+                            str(comp_info.get("Nombre", bc_comp)).strip(),
+                            str(comp_info.get("Color", "")).strip(),
+                            str(comp_info.get("Talla", "")).strip(),
+                        ] if x and x != "nan"
+                    ) or bc_comp
+                    entries.append({
+                        "Cod Barras Variante": bc_var,
+                        "EAN Componente": bc_comp,
+                        "Cantidad": qty,
+                        "_nombre_variante": var_label,
+                        "_nombre_componente": comp_label,
+                    })
+                st.session_state["bom_draft"] = entries
+                st.success(f"BOM cargada: {len(entries)} entradas.")
+                st.rerun()
+
+        with lc2:
+            st.markdown("**O sube un fichero Excel** (mismo formato que `listamateriales.xlsx`)")
+            uploaded = st.file_uploader(
+                "Fichero Excel",
+                type=["xlsx"],
+                key="bom_upload",
+                label_visibility="collapsed",
+            )
+            if uploaded is not None:
+                if st.button("Cargar fichero subido", use_container_width=True):
+                    try:
+                        uploaded_df = pd.read_excel(uploaded)
+                        uploaded_df["Cod Barras Variante"] = (
+                            uploaded_df["Cod Barras Variante"].astype(str).str.strip()
+                        )
+                        uploaded_df["EAN Componente"] = (
+                            uploaded_df["EAN Componente"].astype(str).str.strip()
+                        )
+                        entries = []
+                        for _, row in uploaded_df.iterrows():
+                            bc_var = str(row["Cod Barras Variante"])
+                            bc_comp = str(row["EAN Componente"])
+                            qty = float(row["Cantidad"])
+                            var_info = barcode_lookup.get(bc_var, {})
+                            comp_info = barcode_lookup.get(bc_comp, {})
+                            var_label = str(var_info.get("Nombre", bc_var))
+                            comp_label = str(comp_info.get("Nombre", bc_comp))
+                            entries.append({
+                                "Cod Barras Variante": bc_var,
+                                "EAN Componente": bc_comp,
+                                "Cantidad": qty,
+                                "_nombre_variante": var_label,
+                                "_nombre_componente": comp_label,
+                            })
+                        st.session_state["bom_draft"] = entries
+                        st.success(f"Fichero cargado: {len(entries)} entradas.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al leer el fichero: {e}")
+
+    st.divider()
+
+    # ── Form to add a new BOM entry ──────────────────────────────────────────
+    st.subheader("Añadir componente")
+
+    fc1, fc2, fc3 = st.columns([3, 3, 1.5])
+
+    with fc1:
+        st.markdown("**Prenda (variante de producto)**")
+        sel_var_label = st.selectbox(
+            "Variante",
+            options=variant_label_list,
+            label_visibility="collapsed",
+            key="bom_sel_variant",
         )
-    with c2:
-        buf = BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            plan_df.to_excel(writer, sheet_name="Plan de producción", index=False)
-            results_df.to_excel(writer, sheet_name="Consumos", index=False)
-        st.download_button(
-            "Descargar Excel completo",
-            buf.getvalue(),
-            "consumos.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+        sel_var_bc = variant_label_to_bc.get(sel_var_label, "")
+
+    with fc2:
+        st.markdown("**Componente / Material**")
+        comp_source = st.radio(
+            "Origen del componente",
+            ["Del catálogo de variantes", "Introducir manualmente"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="bom_comp_source",
         )
+        if comp_source == "Del catálogo de variantes":
+            sel_comp_label = st.selectbox(
+                "Componente del catálogo",
+                options=variant_label_list,
+                label_visibility="collapsed",
+                key="bom_sel_comp",
+            )
+            comp_ean = variant_label_to_bc.get(sel_comp_label, "")
+            comp_display_name = sel_comp_label
+        else:
+            comp_ean = st.text_input(
+                "EAN / código del componente",
+                key="bom_comp_ean",
+                placeholder="ej. 8412345678901",
+            )
+            comp_display_name = st.text_input(
+                "Nombre del componente",
+                key="bom_comp_name",
+                placeholder="ej. Tejido principal",
+            )
+
+    with fc3:
+        st.markdown("**Cantidad por unidad**")
+        comp_qty = st.number_input(
+            "Cantidad",
+            min_value=0.001,
+            step=0.1,
+            value=1.0,
+            key="bom_qty",
+            label_visibility="collapsed",
+            format="%.3f",
+        )
+        st.write("")  # vertical spacer
+        add_clicked = st.button(
+            "Añadir", type="primary", use_container_width=True, key="bom_add"
+        )
+
+    if add_clicked:
+        if not str(comp_ean).strip():
+            st.error("El EAN del componente no puede estar vacío.")
+        else:
+            already = any(
+                e["Cod Barras Variante"] == sel_var_bc
+                and e["EAN Componente"] == str(comp_ean).strip()
+                for e in st.session_state["bom_draft"]
+            )
+            if already:
+                st.warning(
+                    "Este componente ya está asignado a esta variante. "
+                    "Elimina la entrada existente si quieres cambiar la cantidad."
+                )
+            else:
+                st.session_state["bom_draft"].append({
+                    "Cod Barras Variante": sel_var_bc,
+                    "EAN Componente": str(comp_ean).strip(),
+                    "Cantidad": comp_qty,
+                    "_nombre_variante": sel_var_label,
+                    "_nombre_componente": comp_display_name or str(comp_ean).strip(),
+                })
+                st.rerun()
+
+    st.divider()
+
+    # ── BOM table ────────────────────────────────────────────────────────────
+    st.subheader("BOM en construcción")
+
+    if not st.session_state["bom_draft"]:
+        st.info(
+            "Aún no hay entradas. Usa el formulario de arriba para añadir componentes, "
+            "o carga una BOM existente como base de partida."
+        )
+    else:
+        draft_df = pd.DataFrame(st.session_state["bom_draft"])
+        draft_df["_idx"] = range(len(draft_df))
+
+        to_delete = None
+
+        for bc_var, group in draft_df.groupby("Cod Barras Variante", sort=False):
+            var_name = group.iloc[0]["_nombre_variante"]
+            st.markdown(
+                f'<div class="ref-card"><span class="ref-title">{var_name}</span></div>',
+                unsafe_allow_html=True,
+            )
+
+            for _, row in group.iterrows():
+                idx = int(row["_idx"])
+                rc1, rc2, rc3, rc4 = st.columns([4, 3, 1, 0.6])
+                rc1.write(row["_nombre_componente"])
+                rc2.caption(f"EAN: {row['EAN Componente']}")
+                rc3.markdown(f"**x {row['Cantidad']:.3g}**")
+                if rc4.button("X", key=f"del_bom_{idx}", help="Eliminar esta entrada"):
+                    to_delete = idx
+
+        if to_delete is not None:
+            st.session_state["bom_draft"].pop(to_delete)
+            st.rerun()
+
+        n_prendas = draft_df["Cod Barras Variante"].nunique()
+        n_entradas = len(draft_df)
+        st.caption(f"{n_prendas} prendas — {n_entradas} entradas en la BOM")
+
+        st.divider()
+
+        # ── Actions ──────────────────────────────────────────────────────────
+        st.subheader("Acciones")
+        ac1, ac2, ac3 = st.columns(3)
+
+        with ac1:
+            if st.button("Limpiar todo", use_container_width=True):
+                st.session_state["bom_draft"] = []
+                if "custom_bom" in st.session_state:
+                    del st.session_state["custom_bom"]
+                st.rerun()
+
+        with ac2:
+            export_rows = [
+                {
+                    "Cod Barras Variante": e["Cod Barras Variante"],
+                    "EAN Componente": e["EAN Componente"],
+                    "Cantidad": e["Cantidad"],
+                }
+                for e in st.session_state["bom_draft"]
+            ]
+            export_df = pd.DataFrame(export_rows)
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                export_df.to_excel(writer, sheet_name="Fichero ejemplo", index=False)
+            st.download_button(
+                "Descargar BOM (Excel)",
+                buf.getvalue(),
+                "lista_materiales.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+        with ac3:
+            if st.button(
+                "Usar esta BOM para calcular",
+                type="primary",
+                use_container_width=True,
+            ):
+                custom_bom_df = pd.DataFrame([
+                    {
+                        "Cod Barras Variante": e["Cod Barras Variante"],
+                        "EAN Componente": e["EAN Componente"],
+                        "Cantidad": float(e["Cantidad"]),
+                    }
+                    for e in st.session_state["bom_draft"]
+                ])
+                st.session_state["custom_bom"] = custom_bom_df
+                st.success(
+                    "BOM personalizada activada. "
+                    "Ve a la pestaña 'Plan de producción' y pulsa 'Calcular Consumos'."
+                )
