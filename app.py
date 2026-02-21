@@ -1090,7 +1090,7 @@ DOCUMENTO A ANALIZAR:
         if st.button("Limpiar plan", use_container_width=True):
             for _k in list(st.session_state.keys()):
                 if _k.startswith("qty_"):
-                    del st.session_state[_k]
+                    st.session_state[_k] = 0
             for _k in ("results_df", "plan_df", "no_bom_warn"):
                 st.session_state.pop(_k, None)
             st.rerun()
