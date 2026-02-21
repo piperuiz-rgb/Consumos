@@ -653,18 +653,24 @@ with tab2:
         zip(all_variants["_label"], all_variants["Código de barras principal"])
     )
 
-    # Finished products only: EAN of exactly 13 digits starting with "8445790"
     _bc_col = "Código de barras principal"
-    prenda_variants = all_variants[
+    _is_finished = (
         all_variants[_bc_col].str.len().eq(13)
         & all_variants[_bc_col].str.startswith("8445790")
-    ].copy()
+    )
+
+    # Finished products only (prenda selectors)
+    prenda_variants = all_variants[_is_finished].copy()
     prenda_label_list = sorted(prenda_variants["_label"].unique().tolist())
     prenda_label_to_bc = dict(zip(prenda_variants["_label"], prenda_variants[_bc_col]))
-    # Map label → tipo de prenda (used in Copiar BOM destination filter)
     prenda_label_to_tipo = dict(
         zip(prenda_variants["_label"], prenda_variants["_tipo_prenda"])
     )
+
+    # Components: everything that is NOT a finished product
+    comp_variants = all_variants[~_is_finished].copy()
+    comp_label_list = sorted(comp_variants["_label"].unique().tolist())
+    comp_label_to_bc = dict(zip(comp_variants["_label"], comp_variants[_bc_col]))
 
     # ── Load existing BOM as starting point ──────────────────────────────────
     with st.expander("Cargar BOM existente como base de partida"):
@@ -776,11 +782,11 @@ with tab2:
         if comp_source == "Del catálogo de variantes":
             sel_comp_label = st.selectbox(
                 "Componente del catálogo",
-                options=variant_label_list,
+                options=comp_label_list,
                 label_visibility="collapsed",
                 key="bom_sel_comp",
             )
-            comp_ean = variant_label_to_bc.get(sel_comp_label, "")
+            comp_ean = comp_label_to_bc.get(sel_comp_label, "")
             comp_display_name = sel_comp_label
         else:
             comp_ean = st.text_input(
@@ -966,11 +972,11 @@ with tab2:
             if bulk_comp_source == "Del catálogo":
                 bulk_sel_comp = st.selectbox(
                     "Componente del catálogo",
-                    options=variant_label_list,
+                    options=comp_label_list,
                     label_visibility="collapsed",
                     key="bulk_sel_comp",
                 )
-                bulk_comp_ean = variant_label_to_bc.get(bulk_sel_comp, "")
+                bulk_comp_ean = comp_label_to_bc.get(bulk_sel_comp, "")
                 bulk_comp_name = bulk_sel_comp
             else:
                 bulk_comp_ean = st.text_input(
