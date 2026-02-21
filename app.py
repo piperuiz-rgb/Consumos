@@ -82,6 +82,9 @@ st.markdown("""
     border-top: 1px solid #bbb;
 }
 
+/* ── BOM missing warning ── */
+.bom-warn { font-size: 0.76em; color: #c0392b; font-weight: 600; margin-left: 10px; }
+
 /* ── Number inputs: compact & centered ── */
 div[data-testid="stNumberInput"] {
     margin-bottom: 0 !important;
@@ -245,8 +248,57 @@ with tab1:
         if bc7.button("Poner a 0", use_container_width=True):
             _bulk_apply(sub_bulk, None)
 
+    # ── Import plan from Excel / CSV ─────────────────────────────────────────
+    with st.expander("Importar plan desde Excel / CSV", expanded=False):
+        st.markdown(
+            "El fichero debe tener al menos dos columnas: una con el **código de barras** "
+            "y otra con las **unidades** a producir. "
+            "Se aceptan nombres de columna en español o inglés."
+        )
+        up_plan = st.file_uploader(
+            "Fichero Excel o CSV",
+            type=["xlsx", "csv"],
+            key="upload_plan",
+            label_visibility="collapsed",
+        )
+        if up_plan is not None:
+            if st.button("Cargar plan", key="btn_import_plan", use_container_width=True):
+                try:
+                    if up_plan.name.lower().endswith(".csv"):
+                        _df_imp = pd.read_csv(up_plan, dtype=str)
+                    else:
+                        _df_imp = pd.read_excel(up_plan, dtype=str)
+                    _bc_col = next(
+                        (c for c in _df_imp.columns
+                         if any(k in c.lower() for k in ("barras", "ean", "barcode", "código"))),
+                        _df_imp.columns[0],
+                    )
+                    _qty_col = next(
+                        (c for c in _df_imp.columns
+                         if any(k in c.lower() for k in ("unidad", "cantidad", "qty", "units"))),
+                        _df_imp.columns[1],
+                    )
+                    _loaded = 0
+                    for _, _imp_row in _df_imp.iterrows():
+                        _bc = str(_imp_row[_bc_col]).strip()
+                        try:
+                            _qty = int(float(str(_imp_row[_qty_col]).strip()))
+                        except ValueError:
+                            continue
+                        if _qty > 0 and _bc in barcode_lookup:
+                            st.session_state[f"qty_{_bc}"] = _qty
+                            _loaded += 1
+                    st.success(f"{_loaded} variantes cargadas desde el fichero.")
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"Error al leer el fichero: {_e}")
+
     # Placeholder filled after matrix so totals reflect current state
     summary_slot = st.empty()
+
+    # ── BOM coverage set (used for matrix indicators) ────────────────────────
+    _active_bom_cov = st.session_state.get("custom_bom", bom)
+    _bom_covered = set(_active_bom_cov["Cod Barras Variante"].unique())
 
     # ── Matrix view ──────────────────────────────────────────────────────────
     for (ref, nombre), grp in df.groupby(["Referencia interna", "Nombre"], sort=True):
@@ -258,10 +310,16 @@ with tab1:
             for _, r in grp.iterrows()
         }
 
-        # Gray reference card
+        # Gray reference card (with BOM coverage indicator)
+        _missing_bom = sum(1 for bc in bc_map.values() if bc not in _bom_covered)
+        _bom_warn_html = (
+            f'<span class="bom-warn">(sin BOM: {_missing_bom} var.)</span>'
+            if _missing_bom else ""
+        )
         st.markdown(
             f'<div class="ref-card">'
             f'<span class="ref-title">{ref} &nbsp;·&nbsp; {nombre}</span>'
+            f'{_bom_warn_html}'
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -340,7 +398,19 @@ with tab1:
     st.divider()
 
     # ── SECTION 2 — Calculate ────────────────────────────────────────────────
-    if st.button("Calcular Consumos", type="primary", use_container_width=True):
+    _bcol1, _bcol2 = st.columns([4, 1])
+    with _bcol1:
+        _calcular = st.button("Calcular Consumos", type="primary", use_container_width=True)
+    with _bcol2:
+        if st.button("Limpiar plan", use_container_width=True):
+            for _k in list(st.session_state.keys()):
+                if _k.startswith("qty_"):
+                    del st.session_state[_k]
+            for _k in ("results_df", "plan_df", "no_bom_warn"):
+                st.session_state.pop(_k, None)
+            st.rerun()
+
+    if _calcular:
         final_qtys = {
             k[4:]: int(v)
             for k, v in st.session_state.items()
@@ -348,59 +418,83 @@ with tab1:
         }
         if not final_qtys:
             st.warning("Introduce la cantidad a producir en al menos una variante.")
-            st.stop()
+        else:
+            active_bom = st.session_state.get("custom_bom", bom)
 
-        # Use custom BOM if active, otherwise use default
-        active_bom = st.session_state.get("custom_bom", bom)
+            # Detect variants without BOM entries
+            no_bom = [bc for bc in final_qtys
+                      if active_bom[active_bom["Cod Barras Variante"] == bc].empty]
+            st.session_state["no_bom_warn"] = no_bom
 
-        comp_totals: dict[str, float] = {}
-        for bc, qty in final_qtys.items():
-            for _, brow in active_bom[active_bom["Cod Barras Variante"] == bc].iterrows():
-                comp = str(brow["EAN Componente"])
-                comp_totals[comp] = comp_totals.get(comp, 0.0) + float(brow["Cantidad"]) * qty
+            comp_totals: dict[str, float] = {}
+            for bc, qty in final_qtys.items():
+                for _, brow in active_bom[active_bom["Cod Barras Variante"] == bc].iterrows():
+                    comp = str(brow["EAN Componente"])
+                    comp_totals[comp] = comp_totals.get(comp, 0.0) + float(brow["Cantidad"]) * qty
 
-        results = []
-        for comp_bc, total_qty in comp_totals.items():
-            info = barcode_lookup.get(comp_bc, {})
-            col_ = str(info.get("Color", "")).strip()
-            tal_ = str(info.get("Talla", "")).strip()
-            results.append(
-                {
+            results = []
+            for comp_bc, total_qty in comp_totals.items():
+                info = barcode_lookup.get(comp_bc, {})
+                col_ = str(info.get("Color", "")).strip()
+                tal_ = str(info.get("Talla", "")).strip()
+                results.append({
                     "Referencia": info.get("Referencia interna", ""),
                     "Nombre": info.get("Nombre", f"Componente {comp_bc}"),
                     "Color": col_ if col_ not in ("", "nan") else "—",
                     "Talla": tal_ if tal_ not in ("", "nan") else "—",
                     "Código de barras": comp_bc,
                     "Cantidad necesaria": round(total_qty, 4),
-                }
+                })
+
+            st.session_state["results_df"] = (
+                pd.DataFrame(results)
+                .sort_values(["Nombre", "Color", "Talla"])
+                .reset_index(drop=True)
             )
 
-        results_df = (
-            pd.DataFrame(results).sort_values(["Nombre", "Color", "Talla"]).reset_index(drop=True)
-        )
-
-        st.header("2. Necesidades de componentes")
-        st.caption(f"{len(results_df)} componentes distintos necesarios para fabricar la colección")
-        st.dataframe(results_df, hide_index=True, use_container_width=True)
-
-        st.subheader("Resumen del plan de producción")
-        plan_rows = []
-        for bc, qty in final_qtys.items():
-            info = barcode_lookup.get(bc, {})
-            plan_rows.append(
-                {
+            plan_rows = []
+            for bc, qty in final_qtys.items():
+                info = barcode_lookup.get(bc, {})
+                plan_rows.append({
                     "Referencia": info.get("Referencia interna", ""),
                     "Nombre": info.get("Nombre", ""),
                     "Color": info.get("Color", ""),
                     "Talla": info.get("Talla", ""),
                     "Código de barras": bc,
                     "Unidades": qty,
-                }
+                })
+            st.session_state["plan_df"] = (
+                pd.DataFrame(plan_rows).sort_values(["Nombre", "Color", "Talla"])
             )
-        plan_df = pd.DataFrame(plan_rows).sort_values(["Nombre", "Color", "Talla"])
+
+    # ── Results (persistent — survive widget interactions) ───────────────────
+    if "results_df" in st.session_state:
+        results_df = st.session_state["results_df"]
+        plan_df = st.session_state["plan_df"]
+
+        # Warning: variants without BOM
+        _no_bom = st.session_state.get("no_bom_warn", [])
+        if _no_bom:
+            _names = [barcode_lookup.get(bc, {}).get("Nombre", bc) for bc in _no_bom[:5]]
+            _extra = f" y {len(_no_bom) - 5} más" if len(_no_bom) > 5 else ""
+            st.warning(
+                f"{len(_no_bom)} variante(s) sin entradas en la BOM — "
+                f"sus consumos no se han calculado: {', '.join(_names)}{_extra}."
+            )
+
+        st.header("2. Necesidades de componentes")
+        st.caption(f"{len(results_df)} componentes distintos necesarios para fabricar la colección")
+        st.dataframe(results_df, hide_index=True, use_container_width=True)
+
+        st.subheader("Resumen del plan de producción")
         st.dataframe(plan_df, hide_index=True, use_container_width=True)
 
         st.subheader("Descargar resultados")
+        pet_fecha = st.date_input(
+            "Fecha de transferencia (plantilla PET)",
+            value=date.today(),
+            key="pet_fecha",
+        )
         c1, c2, c3 = st.columns(3)
         with c1:
             st.download_button(
@@ -423,10 +517,9 @@ with tab1:
                 use_container_width=True,
             )
         with c3:
-            hoy = date.today()
             pet_df = pd.DataFrame([
                 {
-                    "Fecha": hoy,
+                    "Fecha": pet_fecha,
                     "Almacén de origen": "PET Almacén Ibiza",
                     "Almacén de destino": "PET Almacén Túnez",
                     "Observaciones": "",
@@ -441,7 +534,7 @@ with tab1:
             st.download_button(
                 "Descargar plantilla PET",
                 buf_pet.getvalue(),
-                f"PET_{hoy.strftime('%Y%m%d')}.xlsx",
+                f"PET_{pet_fecha.strftime('%Y%m%d')}.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
@@ -848,12 +941,27 @@ with tab2:
 
             for _, row in group.iterrows():
                 idx = int(row["_idx"])
-                rc1, rc2, rc3, rc4 = st.columns([4, 3, 1, 0.6])
+                rc1, rc2, rc3, rc4 = st.columns([4, 2.5, 1.5, 0.6])
                 rc1.write(row["_nombre_componente"])
                 rc2.caption(f"EAN: {row['EAN Componente']}")
-                rc3.markdown(f"**x {row['Cantidad']:.3g}**")
+                _bom_qty_key = f"bom_qty_{row['Cod Barras Variante']}_{row['EAN Componente']}"
+                rc3.number_input(
+                    "Cantidad",
+                    min_value=0.001,
+                    step=0.1,
+                    value=float(row["Cantidad"]),
+                    key=_bom_qty_key,
+                    label_visibility="collapsed",
+                    format="%.3f",
+                )
                 if rc4.button("X", key=f"del_bom_{idx}", help="Eliminar esta entrada"):
                     to_delete = idx
+
+        # Sync edited quantities back to bom_draft
+        for _entry in st.session_state["bom_draft"]:
+            _sk = f"bom_qty_{_entry['Cod Barras Variante']}_{_entry['EAN Componente']}"
+            if _sk in st.session_state:
+                _entry["Cantidad"] = float(st.session_state[_sk])
 
         if to_delete is not None:
             st.session_state["bom_draft"].pop(to_delete)
