@@ -758,61 +758,63 @@ with tab2:
     # ── Form to add a new BOM entry ──────────────────────────────────────────
     st.subheader("Añadir componente")
 
-    fc1, fc2, fc3 = st.columns([3, 3, 1.5])
+    # Row 1: selectors (full width so dropdowns aren't clipped)
+    st.markdown("**Prenda (variante de producto)**")
+    sel_var_label = st.selectbox(
+        "Variante",
+        options=prenda_label_list,
+        label_visibility="collapsed",
+        key="bom_sel_variant",
+    )
+    sel_var_bc = prenda_label_to_bc.get(sel_var_label, "")
 
-    with fc1:
-        st.markdown("**Prenda (variante de producto)**")
-        sel_var_label = st.selectbox(
-            "Variante",
-            options=prenda_label_list,
+    st.markdown("**Componente / Material**")
+    _bom_cq = st.text_input(
+        "Buscar componente por referencia o nombre",
+        placeholder="ej. Tejido, entretela, forro…",
+        key="bom_comp_q",
+        label_visibility="collapsed",
+    )
+    _bom_cq_strip = _bom_cq.strip()
+    if _bom_cq_strip:
+        _bom_comp_filtered = comp_variants[
+            comp_variants["Referencia interna"].str.contains(_bom_cq_strip, case=False, na=False)
+            | comp_variants["Nombre"].str.contains(_bom_cq_strip, case=False, na=False)
+        ]
+    else:
+        _bom_comp_filtered = comp_variants
+    _bom_comp_opts = sorted(_bom_comp_filtered["_label"].unique().tolist())
+    if _bom_comp_opts:
+        sel_comp_label = st.selectbox(
+            "Componente",
+            options=_bom_comp_opts,
             label_visibility="collapsed",
-            key="bom_sel_variant",
+            key="bom_sel_comp",
         )
-        sel_var_bc = prenda_label_to_bc.get(sel_var_label, "")
-
-    with fc2:
-        st.markdown("**Componente / Material**")
-        _bom_cq = st.text_input(
-            "Buscar componente por referencia o nombre",
-            placeholder="ej. Tejido, entretela, forro…",
-            key="bom_comp_q",
-            label_visibility="collapsed",
-        )
-        _bom_cq_strip = _bom_cq.strip()
-        if _bom_cq_strip:
-            _bom_comp_filtered = comp_variants[
-                comp_variants["Referencia interna"].str.contains(_bom_cq_strip, case=False, na=False)
-                | comp_variants["Nombre"].str.contains(_bom_cq_strip, case=False, na=False)
-            ]
-        else:
-            _bom_comp_filtered = comp_variants
-        _bom_comp_opts = sorted(_bom_comp_filtered["_label"].unique().tolist())
-        if _bom_comp_opts:
-            sel_comp_label = st.selectbox(
-                "Componente",
-                options=_bom_comp_opts,
-                label_visibility="collapsed",
-                key="bom_sel_comp",
-            )
-            comp_ean = comp_label_to_bc.get(sel_comp_label, "")
-            comp_display_name = sel_comp_label
-        else:
-            st.warning("Sin resultados. Prueba con otro término.")
-            comp_ean = ""
-            comp_display_name = ""
-        if st.checkbox("No está en el catálogo (introducir EAN)", key="bom_comp_manual"):
+        comp_ean = comp_label_to_bc.get(sel_comp_label, "")
+        comp_display_name = sel_comp_label
+    else:
+        st.warning("Sin resultados. Prueba con otro término.")
+        comp_ean = ""
+        comp_display_name = ""
+    if st.checkbox("No está en el catálogo (introducir EAN)", key="bom_comp_manual"):
+        _bom_ean_c1, _bom_ean_c2 = st.columns(2)
+        with _bom_ean_c1:
             comp_ean = st.text_input(
                 "EAN del componente",
                 key="bom_comp_ean",
                 placeholder="ej. 8412345678901",
             )
+        with _bom_ean_c2:
             comp_display_name = st.text_input(
                 "Nombre del componente",
                 key="bom_comp_name",
                 placeholder="ej. Tejido principal",
             )
 
-    with fc3:
+    # Row 2: quantity + action (narrow controls)
+    fc_qty, fc_btn = st.columns([2, 5])
+    with fc_qty:
         st.markdown("**Cantidad por unidad**")
         comp_qty = st.number_input(
             "Cantidad",
@@ -823,7 +825,9 @@ with tab2:
             label_visibility="collapsed",
             format="%.3f",
         )
-        st.write("")  # vertical spacer
+    with fc_btn:
+        st.write("")
+        st.write("")
         add_clicked = st.button(
             "Añadir", type="primary", use_container_width=True, key="bom_add"
         )
@@ -971,48 +975,53 @@ with tab2:
             )
 
         st.markdown("**Paso 2 — Componente a asignar**")
-        bc1, bc2, bc3, bc4 = st.columns([2.5, 2.5, 1.2, 1.5])
 
-        with bc1:
-            _bulk_cq = st.text_input(
-                "Buscar componente por referencia o nombre",
-                placeholder="ej. Tejido, entretela, forro…",
-                key="bulk_comp_q",
+        # Selector a ancho completo para que el desplegable no se corte
+        _bulk_cq = st.text_input(
+            "Buscar componente por referencia o nombre",
+            placeholder="ej. Tejido, entretela, forro…",
+            key="bulk_comp_q",
+            label_visibility="collapsed",
+        )
+        _bulk_cq_strip = _bulk_cq.strip()
+        if _bulk_cq_strip:
+            _bulk_comp_filtered = comp_variants[
+                comp_variants["Referencia interna"].str.contains(_bulk_cq_strip, case=False, na=False)
+                | comp_variants["Nombre"].str.contains(_bulk_cq_strip, case=False, na=False)
+            ]
+        else:
+            _bulk_comp_filtered = comp_variants
+        _bulk_comp_opts = sorted(_bulk_comp_filtered["_label"].unique().tolist())
+        if _bulk_comp_opts:
+            bulk_sel_comp = st.selectbox(
+                "Componente",
+                options=_bulk_comp_opts,
                 label_visibility="collapsed",
+                key="bulk_sel_comp",
             )
-            _bulk_cq_strip = _bulk_cq.strip()
-            if _bulk_cq_strip:
-                _bulk_comp_filtered = comp_variants[
-                    comp_variants["Referencia interna"].str.contains(_bulk_cq_strip, case=False, na=False)
-                    | comp_variants["Nombre"].str.contains(_bulk_cq_strip, case=False, na=False)
-                ]
-            else:
-                _bulk_comp_filtered = comp_variants
-            _bulk_comp_opts = sorted(_bulk_comp_filtered["_label"].unique().tolist())
-            if _bulk_comp_opts:
-                bulk_sel_comp = st.selectbox(
-                    "Componente",
-                    options=_bulk_comp_opts,
-                    label_visibility="collapsed",
-                    key="bulk_sel_comp",
-                )
-                bulk_comp_ean = comp_label_to_bc.get(bulk_sel_comp, "")
-                bulk_comp_name = bulk_sel_comp
-            else:
-                st.warning("Sin resultados.")
-                bulk_comp_ean = ""
-                bulk_comp_name = ""
-            if st.checkbox("No está en el catálogo (introducir EAN)", key="bulk_comp_manual"):
+            bulk_comp_ean = comp_label_to_bc.get(bulk_sel_comp, "")
+            bulk_comp_name = bulk_sel_comp
+        else:
+            st.warning("Sin resultados.")
+            bulk_comp_ean = ""
+            bulk_comp_name = ""
+        if st.checkbox("No está en el catálogo (introducir EAN)", key="bulk_comp_manual"):
+            _bulk_ean_c1, _bulk_ean_c2 = st.columns(2)
+            with _bulk_ean_c1:
                 bulk_comp_ean = st.text_input(
                     "EAN del componente",
                     placeholder="ej. 8412345678901",
                     key="bulk_comp_ean",
                 )
+            with _bulk_ean_c2:
                 bulk_comp_name = st.text_input(
                     "Nombre del componente",
                     placeholder="ej. Tejido principal",
                     key="bulk_comp_name",
                 )
+
+        # Controles pequeños en fila inferior
+        bc2, bc3, bc4 = st.columns([2, 2, 3])
 
         with bc2:
             st.markdown("Cantidad por unidad")
