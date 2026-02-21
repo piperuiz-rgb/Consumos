@@ -167,38 +167,119 @@ def _sz_key(s):
 # ── SIDEBAR — Asistente IA ────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Asistente IA")
-    st.caption("Pregunta sobre la BOM, el plan o los consumos calculados.")
+    st.caption("Pregunta o da órdenes: establecer cantidades, consultar BOM, analizar consumos…")
 
     if "chat_history" not in st.session_state:
         st.session_state["chat_history"] = []
 
+    # ── Tool definitions ──────────────────────────────────────────────────────
+    _ai_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "set_production_quantities",
+                "description": (
+                    "Establece la cantidad a producir para una o varias variantes del plan "
+                    "de producción. Filtra por referencia, nombre, color y/o talla. "
+                    "Si no se especifica algún campo, no se filtra por él."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "description": "Lista de asignaciones a realizar",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "referencia": {"type": "string", "description": "Referencia interna (parcial)"},
+                                    "nombre": {"type": "string", "description": "Nombre del producto (parcial)"},
+                                    "color": {"type": "string", "description": "Color (parcial)"},
+                                    "talla": {"type": "string", "description": "Talla exacta"},
+                                    "cantidad": {"type": "integer", "description": "Unidades a producir"},
+                                },
+                                "required": ["cantidad"],
+                            },
+                        }
+                    },
+                    "required": ["items"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "clear_production_plan",
+                "description": "Pone a cero todas las cantidades del plan de producción.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+
+    def _exec_set_quantities(items):
+        """Apply set_production_quantities tool call, return human-readable result."""
+        lines = []
+        for item in items:
+            mask = pd.Series([True] * len(finished), index=finished.index)
+            if item.get("referencia"):
+                mask &= finished["Referencia interna"].str.contains(
+                    item["referencia"], case=False, na=False
+                )
+            if item.get("nombre"):
+                mask &= finished["Nombre"].str.contains(
+                    item["nombre"], case=False, na=False
+                )
+            if item.get("color"):
+                mask &= finished["Color"].str.contains(
+                    item["color"], case=False, na=False
+                )
+            if item.get("talla"):
+                mask &= finished["Talla"].str.upper() == str(item["talla"]).upper()
+            matches = finished[mask]
+            if matches.empty:
+                lines.append(f"Sin coincidencias para: {item}")
+            else:
+                for _, row in matches.iterrows():
+                    bc = row["Código de barras principal"]
+                    st.session_state[f"qty_{bc}"] = int(item["cantidad"])
+                    lines.append(
+                        f"✓ {row['Referencia interna']} | {row['Nombre']} | "
+                        f"{row['Color']} | {row['Talla']} → {item['cantidad']} ud."
+                    )
+        return "\n".join(lines) if lines else "No se realizaron cambios."
+
+    def _exec_clear_plan():
+        for _k in list(st.session_state.keys()):
+            if _k.startswith("qty_"):
+                del st.session_state[_k]
+        st.session_state.pop("results_df", None)
+        st.session_state.pop("plan_df", None)
+        return "Plan de producción vaciado."
+
     # ── Chat display ──────────────────────────────────────────────────────────
     for msg in st.session_state["chat_history"]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+        if msg["role"] in ("user", "assistant"):
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
 
     # ── User input ────────────────────────────────────────────────────────────
-    user_input = st.chat_input("Escribe tu pregunta…")
+    user_input = st.chat_input("Escribe tu pregunta u orden…")
 
     if user_input:
         st.session_state["chat_history"].append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # Build data context from current session state
+        # ── Build context ─────────────────────────────────────────────────────
         _ctx_parts = []
 
-        # BOM activa
         _active_bom_ctx = st.session_state.get("custom_bom", bom)
-        _n_bom = len(_active_bom_ctx)
-        _n_var_bom = _active_bom_ctx["Cod Barras Variante"].nunique()
-        _n_comp_bom = _active_bom_ctx["EAN Componente"].nunique()
         _ctx_parts.append(
-            f"BOM activa: {_n_bom} entradas, {_n_var_bom} variantes de prenda, "
-            f"{_n_comp_bom} componentes distintos."
+            f"BOM activa: {len(_active_bom_ctx)} entradas, "
+            f"{_active_bom_ctx['Cod Barras Variante'].nunique()} variantes, "
+            f"{_active_bom_ctx['EAN Componente'].nunique()} componentes distintos."
         )
 
-        # BOM en construcción
         _draft = st.session_state.get("bom_draft", [])
         if _draft:
             _draft_df_ctx = pd.DataFrame(_draft)
@@ -207,74 +288,117 @@ with st.sidebar:
                 f"{_draft_df_ctx['Cod Barras Variante'].nunique()} prendas."
             )
 
-        # Plan de producción
         _plan_qtys = {
             k[4:]: int(v)
             for k, v in st.session_state.items()
             if k.startswith("qty_") and isinstance(v, (int, float)) and v > 0
         }
         if _plan_qtys:
-            _total_units = sum(_plan_qtys.values())
             _ctx_parts.append(
-                f"Plan de producción activo: {len(_plan_qtys)} variantes, "
-                f"{_total_units} unidades totales."
+                f"Plan de producción: {len(_plan_qtys)} variantes, "
+                f"{sum(_plan_qtys.values())} unidades totales."
             )
+        else:
+            _ctx_parts.append("Plan de producción: vacío.")
 
-        # Resultados de consumos calculados
         if "results_df" in st.session_state:
             _res_ctx = st.session_state["results_df"]
-            _top5 = _res_ctx.nlargest(5, "Cantidad necesaria")[
-                ["Nombre", "Cantidad necesaria"]
-            ].to_dict("records")
-            _top5_str = "; ".join(
-                f"{r['Nombre']} ({r['Cantidad necesaria']})" for r in _top5
-            )
+            _top5 = _res_ctx.nlargest(5, "Cantidad necesaria")[["Nombre", "Cantidad necesaria"]].to_dict("records")
+            _top5_str = "; ".join(f"{r['Nombre']} ({r['Cantidad necesaria']})" for r in _top5)
             _ctx_parts.append(
-                f"Consumos calculados: {len(_res_ctx)} componentes. "
-                f"Top 5 por cantidad: {_top5_str}."
+                f"Consumos calculados: {len(_res_ctx)} componentes. Top 5: {_top5_str}."
             )
 
-        # Escenario simulado
-        if "sc_results" in st.session_state:
-            _sc_ctx = st.session_state["sc_results"]
-            _ctx_parts.append(
-                f"Escenario simulado: {len(_sc_ctx)} componentes calculados."
-            )
+        # Catalog summary for the model to match user intent
+        _refs_list = sorted(finished["Referencia interna"].dropna().unique().tolist())
+        _colors_list = sorted(finished["Color"].dropna().unique().tolist())
+        _tallas_list = sorted(finished["Talla"].dropna().unique().tolist(), key=_sz_key)
+        _ctx_parts.append(f"Referencias disponibles: {', '.join(_refs_list[:40])}{'…' if len(_refs_list) > 40 else ''}.")
+        _ctx_parts.append(f"Colores disponibles: {', '.join(_colors_list[:30])}{'…' if len(_colors_list) > 30 else ''}.")
+        _ctx_parts.append(f"Tallas disponibles: {', '.join(_tallas_list)}.")
 
         _context_block = "\n".join(f"- {p}" for p in _ctx_parts)
 
-        system_prompt = f"""Eres un asistente especializado en planificación de producción y \
-gestión de materiales para una empresa de moda. Ayudas al usuario a interpretar \
-y analizar los datos de su aplicación de consumos.
+        _system_prompt = f"""Eres un asistente especializado en planificación de producción \
+y gestión de materiales para una empresa de moda. Puedes responder preguntas Y ejecutar \
+acciones sobre la aplicación usando las funciones disponibles.
 
-Datos actuales disponibles en la aplicación:
+Estado actual de la aplicación:
 {_context_block}
 
-Responde siempre en español, de forma concisa y práctica. \
-Si el usuario pregunta algo que no puedes responder con los datos disponibles, \
-indícalo claramente y sugiere qué información necesitarías."""
+Responde siempre en español, de forma concisa. Cuando el usuario pida establecer cantidades \
+de producción, usa la función set_production_quantities. Cuando pida vaciar o limpiar el plan, \
+usa clear_production_plan. Para preguntas informativas, responde directamente sin usar funciones."""
 
-        _messages_ctx = [{"role": "system", "content": system_prompt}]
-        _messages_ctx += [
+        _messages_api = [{"role": "system", "content": _system_prompt}]
+        _messages_api += [
             {"role": m["role"], "content": m["content"]}
             for m in st.session_state["chat_history"]
+            if m["role"] in ("user", "assistant")
         ]
 
         try:
             _groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-            _response = _groq_client.chat.completions.create(
+
+            # First call — model may request a tool
+            _resp1 = _groq_client.chat.completions.create(
                 model="llama-3.1-8b-instant",
-                messages=_messages_ctx,
+                messages=_messages_api,
+                tools=_ai_tools,
+                tool_choice="auto",
                 max_tokens=512,
-                temperature=0.3,
+                temperature=0.2,
             )
-            _answer = _response.choices[0].message.content
+            _msg1 = _resp1.choices[0].message
+
+            if _msg1.tool_calls:
+                # Execute each tool call
+                _tool_results = []
+                for _tc in _msg1.tool_calls:
+                    _args = json.loads(_tc.function.arguments)
+                    if _tc.function.name == "set_production_quantities":
+                        _tr = _exec_set_quantities(_args.get("items", []))
+                    elif _tc.function.name == "clear_production_plan":
+                        _tr = _exec_clear_plan()
+                    else:
+                        _tr = "Función desconocida."
+                    _tool_results.append({"tool_call_id": _tc.id, "result": _tr})
+
+                # Build tool result messages
+                _messages_api.append(_msg1)
+                for _tr_item in _tool_results:
+                    _messages_api.append({
+                        "role": "tool",
+                        "tool_call_id": _tr_item["tool_call_id"],
+                        "content": _tr_item["result"],
+                    })
+
+                # Second call — model summarises what it did
+                _resp2 = _groq_client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=_messages_api,
+                    max_tokens=256,
+                    temperature=0.2,
+                )
+                _answer = _resp2.choices[0].message.content
+                # Store tool results in history so context is preserved
+                st.session_state["chat_history"].append({
+                    "role": "tool_summary",
+                    "content": "\n".join(r["result"] for r in _tool_results),
+                })
+            else:
+                _answer = _msg1.content or "Sin respuesta."
+
         except Exception as _e:
             _answer = f"Error al conectar con el asistente: {_e}"
 
         st.session_state["chat_history"].append({"role": "assistant", "content": _answer})
         with st.chat_message("assistant"):
             st.markdown(_answer)
+
+        # Rerun so the main area (matrix, plan) reflects any quantity changes
+        if any(m.get("role") == "tool_summary" for m in st.session_state["chat_history"][-3:]):
+            st.rerun()
 
     if st.session_state["chat_history"] and st.button(
         "Limpiar conversación", use_container_width=True
