@@ -652,9 +652,18 @@ with tab2:
     variant_label_to_bc = dict(
         zip(all_variants["_label"], all_variants["Código de barras principal"])
     )
+
+    # Finished products only: EAN of exactly 13 digits starting with "8445790"
+    _bc_col = "Código de barras principal"
+    prenda_variants = all_variants[
+        all_variants[_bc_col].str.len().eq(13)
+        & all_variants[_bc_col].str.startswith("8445790")
+    ].copy()
+    prenda_label_list = sorted(prenda_variants["_label"].unique().tolist())
+    prenda_label_to_bc = dict(zip(prenda_variants["_label"], prenda_variants[_bc_col]))
     # Map label → tipo de prenda (used in Copiar BOM destination filter)
-    variant_label_to_tipo = dict(
-        zip(all_variants["_label"], all_variants["_tipo_prenda"])
+    prenda_label_to_tipo = dict(
+        zip(prenda_variants["_label"], prenda_variants["_tipo_prenda"])
     )
 
     # ── Load existing BOM as starting point ──────────────────────────────────
@@ -749,11 +758,11 @@ with tab2:
         st.markdown("**Prenda (variante de producto)**")
         sel_var_label = st.selectbox(
             "Variante",
-            options=variant_label_list,
+            options=prenda_label_list,
             label_visibility="collapsed",
             key="bom_sel_variant",
         )
-        sel_var_bc = variant_label_to_bc.get(sel_var_label, "")
+        sel_var_bc = prenda_label_to_bc.get(sel_var_label, "")
 
     with fc2:
         st.markdown("**Componente / Material**")
@@ -851,8 +860,8 @@ with tab2:
             )
         with _pfx_c2:
             if bulk_ean_prefix:
-                _pfx_preview = all_variants[
-                    all_variants["Referencia interna"]
+                _pfx_preview = prenda_variants[
+                    prenda_variants["Referencia interna"]
                     .astype(str)
                     .str.startswith(bulk_ean_prefix.strip())
                 ]
@@ -865,7 +874,7 @@ with tab2:
         with bf1:
             bulk_refs = st.multiselect(
                 "Referencia interna",
-                sorted(all_variants["Referencia interna"].dropna().unique().tolist()),
+                sorted(prenda_variants["Referencia interna"].dropna().unique().tolist()),
                 placeholder="Todas las referencias",
                 key="bulk_refs",
             )
@@ -877,20 +886,20 @@ with tab2:
         with bf2:
             bulk_colors = st.multiselect(
                 "Color",
-                sorted(all_variants["Color"].dropna().unique().tolist()),
+                sorted(prenda_variants["Color"].dropna().unique().tolist()),
                 placeholder="Todos los colores",
                 key="bulk_colors",
             )
             bulk_tallas = st.multiselect(
                 "Talla",
-                sorted(all_variants["Talla"].dropna().unique().tolist(), key=_sz_key),
+                sorted(prenda_variants["Talla"].dropna().unique().tolist(), key=_sz_key),
                 placeholder="Todas las tallas",
                 key="bulk_tallas",
             )
         with bf3:
             _tipos_disp = sorted(
                 [
-                    t for t in all_variants["_tipo_prenda"].unique()
+                    t for t in prenda_variants["_tipo_prenda"].unique()
                     if t and t != "—"
                 ],
                 key=lambda x: (len(x), x),
@@ -906,8 +915,8 @@ with tab2:
                 ),
             )
 
-        # Apply filters
-        bulk_target = all_variants.copy()
+        # Apply filters — base is finished products only
+        bulk_target = prenda_variants.copy()
         if bulk_ean_prefix:
             bulk_target = bulk_target[
                 bulk_target["Referencia interna"]
@@ -1065,11 +1074,11 @@ with tab2:
             st.markdown("**Variante origen**")
             copy_src_label = st.selectbox(
                 "Origen",
-                variant_label_list,
+                prenda_label_list,
                 label_visibility="collapsed",
                 key="copy_src",
             )
-            copy_src_bc = variant_label_to_bc.get(copy_src_label, "")
+            copy_src_bc = prenda_label_to_bc.get(copy_src_label, "")
             _src_entries = [
                 e for e in st.session_state["bom_draft"]
                 if e["Cod Barras Variante"] == copy_src_bc
@@ -1084,7 +1093,7 @@ with tab2:
         with _cp2:
             st.markdown("**Variantes destino**")
             _dst_tipo_opts = sorted(
-                [t for t in set(variant_label_to_tipo.values()) if t and t != "—"],
+                [t for t in set(prenda_label_to_tipo.values()) if t and t != "—"],
                 key=lambda x: (len(x), x),
             )
             _filter_dst_tipos = st.multiselect(
@@ -1099,31 +1108,31 @@ with tab2:
             )
             _filter_dst_color = st.multiselect(
                 "Filtrar destinos por color",
-                sorted(all_variants["Color"].dropna().unique().tolist()),
+                sorted(prenda_variants["Color"].dropna().unique().tolist()),
                 placeholder="Todos los colores",
                 key="copy_dst_color",
             )
             _filter_dst_talla = st.multiselect(
                 "Filtrar destinos por talla",
-                sorted(all_variants["Talla"].dropna().unique().tolist(), key=_sz_key),
+                sorted(prenda_variants["Talla"].dropna().unique().tolist(), key=_sz_key),
                 placeholder="Todas las tallas",
                 key="copy_dst_talla",
             )
-            # Build filtered destination option list
-            _dst_options = [l for l in variant_label_list if l != copy_src_label]
+            # Build filtered destination option list (finished products only)
+            _dst_options = [l for l in prenda_label_list if l != copy_src_label]
             if _filter_dst_tipos:
                 _dst_options = [
                     l for l in _dst_options
-                    if variant_label_to_tipo.get(l, "—") in _filter_dst_tipos
+                    if prenda_label_to_tipo.get(l, "—") in _filter_dst_tipos
                 ]
             if _filter_dst_color:
-                _color_map = dict(zip(all_variants["_label"], all_variants["Color"]))
+                _color_map = dict(zip(prenda_variants["_label"], prenda_variants["Color"]))
                 _dst_options = [
                     l for l in _dst_options
                     if _color_map.get(l, "") in _filter_dst_color
                 ]
             if _filter_dst_talla:
-                _talla_map = dict(zip(all_variants["_label"], all_variants["Talla"]))
+                _talla_map = dict(zip(prenda_variants["_label"], prenda_variants["Talla"]))
                 _dst_options = [
                     l for l in _dst_options
                     if _talla_map.get(l, "") in _filter_dst_talla
@@ -1152,7 +1161,7 @@ with tab2:
         if _copy_btn:
             _cp_added = _cp_updated = _cp_skipped = 0
             for _dst_label in copy_dst_labels:
-                _dst_bc = variant_label_to_bc.get(_dst_label, "")
+                _dst_bc = prenda_label_to_bc.get(_dst_label, "")
                 for _se in _src_entries:
                     _ex_idx = next(
                         (
