@@ -525,7 +525,7 @@ Responde siempre en español, de forma concisa.
         ]
 
         try:
-            _groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+            _groq_client = Groq(api_key=st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", "")))
 
             # First call — model may request a tool
             _resp1 = _groq_client.chat.completions.create(
@@ -1545,22 +1545,35 @@ with tab2:
     # ── Import BOM from PDF technical sheet ───────────────────────────────────
     with st.expander("Importar BOM desde ficha técnica (IA)", expanded=False):
         st.markdown(
-            "Sube la ficha técnica en PDF de una prenda y la IA extraerá sus materiales "
-            "automáticamente. Selecciona primero las variantes a las que quieres aplicar la BOM resultante."
+            "Selecciona una **referencia** (sin color ni talla) y sube su ficha técnica estándar. "
+            "La IA extraerá los materiales y asignará automáticamente el componente correcto "
+            "a cada variante de color y talla."
         )
 
-        # Step 1 — select target variants
-        st.markdown("**1. Variantes a las que aplicar la BOM**")
-        pdf_sel_labels = st.multiselect(
-            "Variantes",
-            options=prenda_label_list,
-            placeholder="Selecciona una o más variantes…",
-            key="pdf_sel_prendas",
+        # Step 1 — select reference (no color/size)
+        st.markdown("**1. Referencia del producto**")
+        _pdf_ref_opts = (
+            prenda_variants[["Referencia interna", "Nombre"]]
+            .drop_duplicates()
+            .sort_values("Referencia interna")
+        )
+        _pdf_ref_opts["_rl"] = (
+            _pdf_ref_opts["Referencia interna"].str.strip()
+            + " | "
+            + _pdf_ref_opts["Nombre"].str.strip()
+        )
+        _pdf_ref_label_list = _pdf_ref_opts["_rl"].tolist()
+
+        pdf_sel_ref = st.selectbox(
+            "Referencia",
+            options=_pdf_ref_label_list,
+            placeholder="Selecciona una referencia…",
+            key="pdf_sel_ref",
             label_visibility="collapsed",
         )
 
         # Step 2 — upload PDF
-        st.markdown("**2. Sube la ficha técnica (PDF)**")
+        st.markdown("**2. Sube la ficha técnica estándar (PDF)**")
         pdf_file = st.file_uploader(
             "Ficha técnica PDF",
             type=["pdf"],
@@ -1568,7 +1581,18 @@ with tab2:
             label_visibility="collapsed",
         )
 
-        if pdf_file and pdf_sel_labels:
+        if pdf_file and pdf_sel_ref:
+            _sel_ref_id = pdf_sel_ref.split(" | ")[0].strip()
+            _ref_vars = prenda_variants[
+                prenda_variants["Referencia interna"] == _sel_ref_id
+            ].copy()
+            _ref_colors = sorted(_ref_vars["Color"].unique().tolist())
+            _ref_tallas = sorted(_ref_vars["Talla"].unique().tolist())
+            st.caption(
+                f"Se generará BOM para {len(_ref_vars)} variantes: "
+                f"{len(_ref_colors)} color(es) × {len(_ref_tallas)} talla(s)"
+            )
+
             if st.button(
                 "Analizar ficha técnica",
                 type="primary",
@@ -1596,9 +1620,14 @@ with tab2:
                         st.error(f"Error al leer el PDF: {_pe}")
 
                 if _pdf_text:
-                    with st.spinner("La IA está analizando la ficha técnica…"):
+                    with st.spinner("La IA está analizando los materiales…"):
                         try:
-                            _pdf_groq = Groq(api_key=st.secrets["GROQ_API_KEY"])
+                            _pdf_groq = Groq(
+                                api_key=st.secrets.get(
+                                    "GROQ_API_KEY",
+                                    os.environ.get("GROQ_API_KEY", ""),
+                                )
+                            )
                             _pdf_resp = _pdf_groq.chat.completions.create(
                                 model="llama-3.1-8b-instant",
                                 messages=[
@@ -1606,12 +1635,14 @@ with tab2:
                                         "role": "system",
                                         "content": (
                                             "Eres un experto en fichas técnicas de prendas de moda. "
-                                            "Tu tarea es extraer TODOS los materiales, tejidos, forros, "
-                                            "entretelas, accesorios y componentes mencionados, con sus "
-                                            "cantidades y unidades. "
+                                            "Extrae TODOS los materiales, tejidos, forros, entretelas, "
+                                            "accesorios y componentes. Para cada componente detecta su "
+                                            "color si está indicado en la ficha. "
                                             'Devuelve ÚNICAMENTE un JSON con la clave "componentes", '
-                                            "un array de objetos con los campos: "
-                                            '"nombre" (string), "cantidad" (número), '
+                                            "array de objetos con los campos: "
+                                            '"nombre" (string, tipo de material sin incluir el color), '
+                                            '"color" (string, color del componente o "" si no se especifica), '
+                                            '"cantidad" (número), '
                                             '"unidad" (string: m, ud, kg, cm, etc.). '
                                             "Si no hay cantidad usa 1. Si no hay unidad usa 'ud'."
                                         ),
@@ -1633,107 +1664,171 @@ with tab2:
                             st.error(f"Error en el análisis IA: {_ae}")
 
                     if _pdf_comps:
-                        # Match each extracted component against the catalog
-                        _pdf_results = []
-                        for _pc in _pdf_comps:
-                            _nombre   = str(_pc.get("nombre", "")).strip()
-                            _cantidad = float(_pc.get("cantidad", 1))
-                            _unidad   = str(_pc.get("unidad", "ud"))
-                            _cm = _match_comp(_nombre)
-                            if not _cm.empty:
-                                _cr = _cm.iloc[0]
-                                _comp_bc    = _cr["Código de barras principal"]
-                                _comp_label = (
-                                    f"{_cr['Referencia interna']} | {_cr['Nombre']} | "
-                                    f"{_cr['Color']} | {_cr['Talla']}"
-                                )
-                                _pdf_results.append({
-                                    "Extraído de la ficha":   _nombre,
-                                    "Cantidad": _cantidad,
-                                    "Unidad":   _unidad,
-                                    "Componente en catálogo": f"{_cr['Referencia interna']} | {_cr['Nombre']}",
-                                    "Estado":   "✓ Encontrado",
-                                    "_comp_bc":    _comp_bc,
-                                    "_comp_label": _comp_label,
-                                })
-                            else:
-                                _pdf_results.append({
-                                    "Extraído de la ficha":   _nombre,
-                                    "Cantidad": _cantidad,
-                                    "Unidad":   _unidad,
-                                    "Componente en catálogo": "— No encontrado en catálogo",
-                                    "Estado":   "⚠ Sin coincidencia",
-                                    "_comp_bc":    None,
-                                    "_comp_label": None,
-                                })
+                        # Smart color-aware matching: for each finished variant, find
+                        # the catalog component that best matches the variant's color.
+                        _pdf_var_results = []
+                        for _, _vrow in _ref_vars.iterrows():
+                            _v_color = _vrow["Color"]
+                            _v_talla = _vrow["Talla"]
+                            _v_bc    = _vrow["Código de barras principal"]
+                            _v_label = _vrow["_label"]
+                            _v_comps = []
+                            for _pc in _pdf_comps:
+                                _nombre    = str(_pc.get("nombre", "")).strip()
+                                _pc_color  = str(_pc.get("color", "")).strip()
+                                _cantidad  = float(_pc.get("cantidad", 1))
+                                _unidad    = str(_pc.get("unidad", "ud"))
+                                _cm_all    = _match_comp(_nombre)
+                                _comp_match = None
+                                if not _cm_all.empty:
+                                    # Priority 1: catalog component whose color matches
+                                    # the finished product variant color
+                                    _cm_vc = _cm_all[
+                                        _cm_all["Color"].str.contains(
+                                            _v_color, case=False, na=False
+                                        )
+                                    ]
+                                    if not _cm_vc.empty:
+                                        _comp_match = _cm_vc.iloc[0]
+                                    else:
+                                        # Priority 2: catalog component whose color
+                                        # matches the color the AI detected in the sheet
+                                        if _pc_color:
+                                            _cm_pc = _cm_all[
+                                                _cm_all["Color"].str.contains(
+                                                    _pc_color, case=False, na=False
+                                                )
+                                            ]
+                                            if not _cm_pc.empty:
+                                                _comp_match = _cm_pc.iloc[0]
+                                        # Priority 3: UNICA / talla única
+                                        if _comp_match is None:
+                                            _cm_unica = _cm_all[
+                                                _cm_all["Talla"].str.upper().isin(
+                                                    ["UNICA", "ÚNICA", "UNICO", "U"]
+                                                )
+                                            ]
+                                            _comp_match = (
+                                                _cm_unica.iloc[0]
+                                                if not _cm_unica.empty
+                                                else _cm_all.iloc[0]
+                                            )
+                                if _comp_match is not None:
+                                    _v_comps.append({
+                                        "nombre_extraido": _nombre,
+                                        "color_extraido":  _pc_color,
+                                        "cantidad":        _cantidad,
+                                        "unidad":          _unidad,
+                                        "comp_bc":         _comp_match["Código de barras principal"],
+                                        "comp_ref":        _comp_match["Referencia interna"],
+                                        "comp_nombre":     _comp_match["Nombre"],
+                                        "comp_color":      _comp_match["Color"],
+                                        "comp_talla":      _comp_match["Talla"],
+                                        "status":          "✓ Encontrado",
+                                    })
+                                else:
+                                    _v_comps.append({
+                                        "nombre_extraido": _nombre,
+                                        "color_extraido":  _pc_color,
+                                        "cantidad":        _cantidad,
+                                        "unidad":          _unidad,
+                                        "comp_bc":         None,
+                                        "comp_ref":        None,
+                                        "comp_nombre":     None,
+                                        "comp_color":      None,
+                                        "comp_talla":      None,
+                                        "status":          "⚠ Sin coincidencia",
+                                    })
+                            _pdf_var_results.append({
+                                "label":       _v_label,
+                                "bc":          _v_bc,
+                                "color":       _v_color,
+                                "talla":       _v_talla,
+                                "componentes": _v_comps,
+                            })
                         st.session_state["pdf_analysis"] = {
-                            "prendas":    pdf_sel_labels,
-                            "resultados": _pdf_results,
+                            "ref_label": pdf_sel_ref,
+                            "variantes": _pdf_var_results,
                         }
                     else:
                         st.warning("No se identificaron componentes en la ficha técnica.")
                 elif not _pdf_text:
-                    st.warning("No se pudo extraer texto del PDF. Comprueba que no esté protegido o sea solo imágenes.")
+                    st.warning(
+                        "No se pudo extraer texto del PDF. "
+                        "Comprueba que no esté protegido o sea solo imágenes."
+                    )
 
         # Step 3 — review and confirm
         _pa = st.session_state.get("pdf_analysis")
-        if _pa and _pa.get("prendas") == pdf_sel_labels:
-            _res = _pa["resultados"]
-            _matched   = [r for r in _res if r["_comp_bc"]]
-            _unmatched = [r for r in _res if not r["_comp_bc"]]
+        if _pa and _pa.get("ref_label") == pdf_sel_ref:
+            _vars = _pa["variantes"]
+            _total_ok  = sum(1 for v in _vars for c in v["componentes"] if c["comp_bc"])
+            _total_nok = sum(1 for v in _vars for c in v["componentes"] if not c["comp_bc"])
 
-            st.markdown("**3. Revisa los resultados y confirma**")
+            st.markdown("**3. Revisa la asignación por variante y confirma**")
             st.caption(
-                f"{len(_matched)} componentes encontrados en el catálogo"
-                + (f" — {len(_unmatched)} sin coincidencia" if _unmatched else "")
+                f"{_total_ok} asignaciones correctas"
+                + (f" — {_total_nok} sin coincidencia" if _total_nok else "")
             )
+
+            # Flat display table: one row per (variant × component)
+            _display_rows = []
+            for _v in _vars:
+                for _c in _v["componentes"]:
+                    _display_rows.append({
+                        "Variante":            f"{_v['color']} / {_v['talla']}",
+                        "Material extraído":   _c["nombre_extraido"],
+                        "Cantidad":            _c["cantidad"],
+                        "Ud.":                 _c["unidad"],
+                        "Componente asignado": (
+                            f"{_c['comp_ref']} | {_c['comp_nombre']} | {_c['comp_color']}"
+                            if _c["comp_bc"]
+                            else "— Sin coincidencia"
+                        ),
+                        "Estado": _c["status"],
+                    })
             st.dataframe(
-                pd.DataFrame([
-                    {k: v for k, v in r.items() if not k.startswith("_")}
-                    for r in _res
-                ]),
+                pd.DataFrame(_display_rows),
                 hide_index=True,
                 use_container_width=True,
             )
 
-            if _unmatched:
+            if _total_nok:
                 st.info(
-                    "Los componentes marcados como '⚠ Sin coincidencia' no se encontraron "
-                    "en el catálogo de variantes. Puedes añadirlos manualmente desde el formulario."
+                    "Los materiales sin coincidencia no se añadirán. "
+                    "Puedes asignarlos manualmente desde el formulario."
                 )
 
-            if _matched:
+            if _total_ok:
                 if st.button(
-                    f"Añadir {len(_matched)} componente(s) a la BOM de "
-                    f"{len(pdf_sel_labels)} variante(s)",
+                    f"Añadir {_total_ok} asignaciones a la BOM",
                     type="primary",
                     use_container_width=True,
                     key="pdf_add_bom",
                 ):
                     _added = 0
-                    for _plabel in _pa["prendas"]:
-                        _p_bc = prenda_label_to_bc.get(_plabel, "")
-                        if not _p_bc:
-                            continue
-                        for _r in _matched:
+                    for _v in _vars:
+                        for _c in _v["componentes"]:
+                            if not _c["comp_bc"]:
+                                continue
                             _exists = any(
-                                e["Cod Barras Variante"] == _p_bc
-                                and e["EAN Componente"] == _r["_comp_bc"]
+                                e["Cod Barras Variante"] == _v["bc"]
+                                and e["EAN Componente"] == _c["comp_bc"]
                                 for e in st.session_state["bom_draft"]
                             )
                             if not _exists:
                                 st.session_state["bom_draft"].append({
-                                    "Cod Barras Variante": _p_bc,
-                                    "EAN Componente":      _r["_comp_bc"],
-                                    "Cantidad":            _r["Cantidad"],
-                                    "_nombre_variante":    _plabel,
-                                    "_nombre_componente":  _r["_comp_label"],
+                                    "Cod Barras Variante": _v["bc"],
+                                    "EAN Componente":      _c["comp_bc"],
+                                    "Cantidad":            _c["cantidad"],
+                                    "_nombre_variante":    _v["label"],
+                                    "_nombre_componente":  (
+                                        f"{_c['comp_ref']} | {_c['comp_nombre']} | {_c['comp_color']}"
+                                    ),
                                 })
                                 _added += 1
                     del st.session_state["pdf_analysis"]
-                    st.success(
-                        f"Añadidas {_added} entradas a la BOM en construcción."
-                    )
+                    st.success(f"Añadidas {_added} entradas a la BOM en construcción.")
                     st.rerun()
 
     # ── Copy BOM from one variant to others ───────────────────────────────────
