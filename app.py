@@ -437,24 +437,38 @@ with st.sidebar:
 
     def _exec_set_quantities(items):
         """Apply set_production_quantities tool call, return human-readable result."""
+        # Scope is always restricted to the current plan:
+        # - variants present in the loaded BOM (qty may be 0)
+        # - variants that already have a qty_* key in session state
+        _cbom_exec = st.session_state.get("custom_bom", bom)
+        _bom_bcs_exec = (
+            set(_cbom_exec["Cod Barras Variante"].astype(str).str.strip().unique())
+            if not _cbom_exec.empty else set()
+        )
+        _qty_bcs_exec = {k[4:] for k in st.session_state if k.startswith("qty_")}
+        _scope_bcs = _bom_bcs_exec | _qty_bcs_exec
+        _scope = (
+            finished[finished["Código de barras principal"].isin(_scope_bcs)]
+            if _scope_bcs else finished.iloc[:0]
+        )
         lines = []
         for item in items:
-            mask = pd.Series([True] * len(finished), index=finished.index)
+            mask = pd.Series([True] * len(_scope), index=_scope.index)
             if item.get("referencia"):
-                mask &= finished["Referencia interna"].str.contains(
+                mask &= _scope["Referencia interna"].str.contains(
                     item["referencia"], case=False, na=False
                 )
             if item.get("nombre"):
-                mask &= finished["Nombre"].str.contains(
+                mask &= _scope["Nombre"].str.contains(
                     item["nombre"], case=False, na=False
                 )
             if item.get("color"):
-                mask &= finished["Color"].str.contains(
+                mask &= _scope["Color"].str.contains(
                     item["color"], case=False, na=False
                 )
             if item.get("talla"):
-                mask &= finished["Talla"].str.upper() == str(item["talla"]).upper()
-            matches = finished[mask]
+                mask &= _scope["Talla"].str.upper() == str(item["talla"]).upper()
+            matches = _scope[mask]
             if matches.empty:
                 lines.append(f"Sin coincidencias para: {item}")
             else:
@@ -584,6 +598,26 @@ with st.sidebar:
         else:
             _ctx_parts.append("Plan de producción: vacío.")
 
+        # Plan scope: BOM variants + variants with qty key (used to restrict set_production_quantities)
+        _bom_bcs_ctx = (
+            set(_active_bom_ctx["Cod Barras Variante"].astype(str).str.strip().unique())
+            if not _active_bom_ctx.empty else set()
+        )
+        _qty_bcs_ctx = {k[4:] for k in st.session_state if k.startswith("qty_")}
+        _plan_bcs_ctx = _bom_bcs_ctx | _qty_bcs_ctx
+        if _plan_bcs_ctx:
+            _plan_scope = finished[finished["Código de barras principal"].isin(_plan_bcs_ctx)]
+            _pr = sorted(_plan_scope["Referencia interna"].dropna().unique().tolist())
+            _pc = sorted(_plan_scope["Color"].dropna().unique().tolist())
+            _pt = sorted(_plan_scope["Talla"].dropna().unique().tolist(), key=_sz_key)
+            _ctx_parts.append(
+                f"Plan actual — referencias: {', '.join(_pr[:40])}{'…' if len(_pr)>40 else ''}."
+            )
+            _ctx_parts.append(
+                f"Plan actual — colores: {', '.join(_pc[:30])}{'…' if len(_pc)>30 else ''}."
+            )
+            _ctx_parts.append(f"Plan actual — tallas: {', '.join(_pt)}.")
+
         if "results_df" in st.session_state:
             _res_ctx = st.session_state["results_df"]
             _top5 = _res_ctx.nlargest(5, "Cantidad necesaria")[["Nombre", "Cantidad necesaria"]].to_dict("records")
@@ -627,6 +661,10 @@ Estado actual de la aplicación:
 
 Responde siempre en español, de forma concisa.
 - Para establecer cantidades de producción → set_production_quantities
+  IMPORTANTE: set_production_quantities SOLO puede modificar variantes que ya están en el \
+plan actual (las listadas en "Plan actual — referencias/colores/tallas"). Nunca actúa sobre \
+el catálogo completo. Si el plan está vacío, informa al usuario de que primero debe cargar \
+una lista de materiales o añadir variantes al plan.
 - Para vaciar el plan → clear_production_plan
 - Para añadir componentes a la BOM en construcción → add_bom_entries
 - Para eliminar componentes de la BOM en construcción → remove_bom_entries
