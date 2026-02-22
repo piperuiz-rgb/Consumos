@@ -849,14 +849,13 @@ with tab1:
                         )
 
                     if _n_ok > 0 and st.button(
-                        "Importar y calcular consumos",
+                        "Importar plan",
                         key="btn_import_plan",
                         type="primary",
                         use_container_width=True,
                     ):
                         for _, _r in _prev_df[_prev_df["_ok"]].iterrows():
                             st.session_state[f"qty_{_r['Código de barras']}"] = int(_r["Unidades"])
-                        st.session_state["_auto_calcular"] = True
                         st.rerun()
                 else:
                     st.warning("No se encontraron filas válidas en el fichero.")
@@ -1077,6 +1076,104 @@ DOCUMENTO A ANALIZAR:
                         hide_index=True,
                     )
 
+    # ── Quick-adjust: plan actual ─────────────────────────────────────────────
+    _active_qtys = {
+        k[4:]: int(v)
+        for k, v in st.session_state.items()
+        if k.startswith("qty_") and isinstance(v, (int, float)) and int(v) > 0
+    }
+    _calc_from_adj = False  # may be set to True by the button below
+
+    if _active_qtys:
+        st.divider()
+        _adj_total_units = sum(_active_qtys.values())
+        st.subheader(
+            f"Plan actual — {len(_active_qtys)} variantes · {_adj_total_units:,} unidades"
+        )
+
+        # Build display dataframe from finished variants
+        _adj_df = finished[
+            finished["Código de barras principal"].isin(_active_qtys.keys())
+        ][["Referencia interna", "Nombre", "Color", "Talla",
+           "Código de barras principal"]].copy()
+        # Also include custom-added finished products not in `finished`
+        _adj_extra = variantes[
+            variantes["Código de barras principal"].isin(_active_qtys.keys()) &
+            ~variantes["Código de barras principal"].isin(
+                finished["Código de barras principal"]
+            )
+        ][["Referencia interna", "Nombre", "Color", "Talla",
+           "Código de barras principal"]].copy()
+        _adj_df = pd.concat([_adj_df, _adj_extra], ignore_index=True)
+        _adj_df["Cantidad"] = _adj_df["Código de barras principal"].map(_active_qtys)
+
+        # Color + talla filters for this focused view
+        _adjf1, _adjf2 = st.columns(2)
+        with _adjf1:
+            _adj_sel_colors = st.multiselect(
+                "Filtrar por color",
+                sorted(_adj_df["Color"].dropna().unique().tolist()),
+                key="adj_colors",
+                placeholder="Todos los colores",
+            )
+        with _adjf2:
+            _adj_sel_tallas = st.multiselect(
+                "Filtrar por talla",
+                sorted(_adj_df["Talla"].dropna().unique().tolist(), key=_sz_key),
+                key="adj_tallas",
+                placeholder="Todas las tallas",
+            )
+
+        _sub_adj = _adj_df.copy()
+        if _adj_sel_colors:
+            _sub_adj = _sub_adj[_sub_adj["Color"].isin(_adj_sel_colors)]
+        if _adj_sel_tallas:
+            _sub_adj = _sub_adj[_sub_adj["Talla"].isin(_adj_sel_tallas)]
+
+        _adj_vis_units = int(_sub_adj["Cantidad"].sum())
+        st.caption(
+            f"{len(_sub_adj)} de {len(_adj_df)} variantes en vista · "
+            f"{_adj_vis_units:,} unidades"
+        )
+
+        # Read-only table showing current quantities
+        st.dataframe(
+            _sub_adj[["Referencia interna", "Nombre", "Color", "Talla", "Cantidad"]]
+            .rename(columns={"Referencia interna": "Referencia"})
+            .sort_values(["Nombre", "Color", "Talla"])
+            .reset_index(drop=True),
+            hide_index=True,
+            use_container_width=True,
+            height=min(420, 38 + len(_sub_adj) * 35),
+        )
+
+        # +/- bulk adjustment buttons (scoped to filtered view)
+        _ab1, _ab2, _ab3, _asep, _ab4, _ab5, _ab6, _asep2, _ab7 = st.columns(
+            [1, 1, 1, 0.3, 1, 1, 1, 0.3, 1.5]
+        )
+        if _ab1.button("− 10", key="adj_m10", use_container_width=True):
+            _bulk_apply(_sub_adj, -10)
+        if _ab2.button("− 5",  key="adj_m5",  use_container_width=True):
+            _bulk_apply(_sub_adj, -5)
+        if _ab3.button("− 1",  key="adj_m1",  use_container_width=True):
+            _bulk_apply(_sub_adj, -1)
+        if _ab4.button("+ 1",  key="adj_p1",  use_container_width=True):
+            _bulk_apply(_sub_adj, +1)
+        if _ab5.button("+ 5",  key="adj_p5",  use_container_width=True):
+            _bulk_apply(_sub_adj, +5)
+        if _ab6.button("+ 10", key="adj_p10", use_container_width=True):
+            _bulk_apply(_sub_adj, +10)
+        if _ab7.button("Poner a 0", key="adj_zero", use_container_width=True):
+            _bulk_apply(_sub_adj, None)
+
+        st.divider()
+        _calc_from_adj = st.button(
+            "Calcular consumos",
+            key="calc_from_adj",
+            type="primary",
+            use_container_width=True,
+        )
+
     # Placeholder filled after matrix so totals reflect current state
     summary_slot = st.empty()
 
@@ -1200,10 +1297,10 @@ DOCUMENTO A ANALIZAR:
                 st.session_state.pop(_k, None)
             st.rerun()
 
-    # Consume the auto-calculate flag set by the importer
+    # Consume the auto-calculate flag (set programmatically by other paths)
     _auto_calcular = st.session_state.pop("_auto_calcular", False)
 
-    if _calcular or _auto_calcular:
+    if _calcular or _auto_calcular or _calc_from_adj:
         final_qtys = {
             k[4:]: int(v)
             for k, v in st.session_state.items()
