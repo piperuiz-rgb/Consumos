@@ -197,8 +197,17 @@ def load_data():
         variantes = pd.concat([variantes, _extras_df], ignore_index=True)
 
     barcode_lookup = variantes.set_index("Código de barras principal").to_dict("index")
-    bom_barcodes = set(bom["Cod Barras Variante"].unique())
-    finished = variantes[variantes["Código de barras principal"].isin(bom_barcodes)].copy()
+
+    # finished = all finished-product variants (EAN-13 starting 8445790 OR _es_prenda flag).
+    # Intentionally BOM-independent: the planning grid must show all products
+    # regardless of whether a BOM is loaded.
+    _fin_mask = (
+        variantes["Código de barras principal"].str.len().eq(13)
+        & variantes["Código de barras principal"].str.startswith("8445790")
+    )
+    if "_es_prenda" in variantes.columns:
+        _fin_mask = _fin_mask | variantes["_es_prenda"].astype(bool)
+    finished = variantes[_fin_mask].copy()
 
     return variantes, bom, barcode_lookup, finished
 
@@ -1091,20 +1100,11 @@ DOCUMENTO A ANALIZAR:
             f"Plan actual — {len(_active_qtys)} variantes · {_adj_total_units:,} unidades"
         )
 
-        # Build display dataframe from finished variants
+        # Build display dataframe — finished now covers all prendas (BOM-independent)
         _adj_df = finished[
             finished["Código de barras principal"].isin(_active_qtys.keys())
         ][["Referencia interna", "Nombre", "Color", "Talla",
            "Código de barras principal"]].copy()
-        # Also include custom-added finished products not in `finished`
-        _adj_extra = variantes[
-            variantes["Código de barras principal"].isin(_active_qtys.keys()) &
-            ~variantes["Código de barras principal"].isin(
-                finished["Código de barras principal"]
-            )
-        ][["Referencia interna", "Nombre", "Color", "Talla",
-           "Código de barras principal"]].copy()
-        _adj_df = pd.concat([_adj_df, _adj_extra], ignore_index=True)
         _adj_df["Cantidad"] = _adj_df["Código de barras principal"].map(_active_qtys)
 
         # Color + talla filters for this focused view
