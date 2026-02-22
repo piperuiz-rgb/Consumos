@@ -47,17 +47,30 @@ def _delete_extra_variant(barcode: str):
 
 
 def _save_bom_draft():
-    """Write bom_draft to disk so it survives page reloads."""
+    """Write bom_draft to disk only when it has changed since last save."""
     try:
         data = [
             {**e, "Cantidad": float(e["Cantidad"])}
             for e in st.session_state.get("bom_draft", [])
         ]
+        _serialised = json.dumps(data, ensure_ascii=False, sort_keys=True)
+        _new_hash = hash(_serialised)
+        if st.session_state.get("_bom_draft_saved_hash") == _new_hash:
+            return  # nothing changed — skip disk write
         BOM_SESSION_FILE.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        st.session_state["_bom_draft_saved_hash"] = _new_hash
     except Exception:
         pass
+
+def _get_groq_api_key() -> str:
+    """Return the Groq API key from Streamlit secrets or environment variable."""
+    try:
+        return st.secrets["GROQ_API_KEY"]
+    except Exception:
+        return os.environ.get("GROQ_API_KEY", "")
+
 
 st.set_page_config(
     page_title="Planificación de Consumos",
@@ -287,6 +300,8 @@ with st.sidebar:
 
     if "chat_history" not in st.session_state:
         st.session_state["chat_history"] = []
+    # Ensure bom_draft is always initialised before any tool call accesses it
+    st.session_state.setdefault("bom_draft", [])
 
     # ── Variant / component catalogs for BOM tools ────────────────────────────
     _sb_all = variantes.dropna(subset=["Código de barras principal"]).copy()
@@ -678,11 +693,7 @@ una lista de materiales o añadir variantes al plan.
         ]
 
         try:
-            try:
-                _chat_api_key = st.secrets["GROQ_API_KEY"]
-            except Exception:
-                _chat_api_key = os.environ.get("GROQ_API_KEY", "")
-            _groq_client = Groq(api_key=_chat_api_key, timeout=30.0)
+            _groq_client = Groq(api_key=_get_groq_api_key(), timeout=30.0)
 
             # First call — model may request a tool
             _resp1 = _groq_client.chat.completions.create(
@@ -902,14 +913,14 @@ with tab1:
 
                     if _bom_imp is not None and not _bom_imp.empty:
                         # Unique finished-product EANs in the BOM
-                        _bom_eans = (
+                        _imp_bom_eans = (
                             _bom_imp["Cod Barras Variante"]
                             .str.replace(r"\.0+$", "", regex=True)
                             .str.strip()
                             .unique()
                         )
                         _bom_prev = []
-                        for _bc in _bom_eans:
+                        for _bc in _imp_bom_eans:
                             _info = barcode_lookup.get(_bc, {})
                             _n_comp = int((_bom_imp["Cod Barras Variante"] == _bc).sum())
                             _bom_prev.append({
@@ -975,7 +986,7 @@ with tab1:
                                 })
                             st.session_state["bom_draft"] = _draft_entries
                             # Initialise qty_* keys at 0 for all recognised variants
-                            for _bc in _bom_eans:
+                            for _bc in _imp_bom_eans:
                                 if barcode_lookup.get(_bc):
                                     st.session_state.setdefault(f"qty_{_bc}", 0)
                             st.success(
@@ -1139,9 +1150,7 @@ DOCUMENTO A ANALIZAR:
 {_raw_text[:6000]}
 """
                             # ── Call Groq AI ──────────────────────────────────
-                            _ai_client = Groq(
-                                api_key=st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
-                            )
+                            _ai_client = Groq(api_key=_get_groq_api_key())
                             _ai_resp = None
                             for _attempt in range(3):
                                 try:
@@ -1253,7 +1262,7 @@ DOCUMENTO A ANALIZAR:
                 if st.button("Aplicar al plan de producción", key="btn_apply_ai_plan", use_container_width=True, type="primary"):
                     for _m in _matched_res:
                         _sk = f"qty_{_m['barcode']}"
-                        st.session_state[_sk] = st.session_state.get(_sk, 0) + _m["cantidad"]
+                        st.session_state[_sk] = _m["cantidad"]
                     del st.session_state["ai_plan_matched"]
                     if "ai_plan_unmatched" in st.session_state:
                         del st.session_state["ai_plan_unmatched"]
@@ -2494,16 +2503,9 @@ with tab2:
                 if _pdf_text:
                     with st.spinner("La IA está analizando los materiales…"):
                         _pdf_comps = []
-                        try:
-                            _groq_api_key = st.secrets["GROQ_API_KEY"]
-                        except Exception:
-                            _groq_api_key = os.environ.get("GROQ_API_KEY", "")
+                        _pdf_groq = Groq(api_key=_get_groq_api_key(), timeout=30.0)
                         for _attempt in range(3):
                             try:
-                                _pdf_groq = Groq(
-                                    api_key=_groq_api_key,
-                                    timeout=30.0,
-                                )
                                 _pdf_resp = _pdf_groq.chat.completions.create(
                                     model="llama-3.3-70b-versatile",
                                     messages=[
@@ -3296,6 +3298,74 @@ with tab3:
         if _sb7.button("Poner a 0", use_container_width=True, key="sc_reset"):
             _sc_bulk_apply(sc_sub_bulk, None)
 
+    # ── Active scenario summary (mirrors Tab1 "Plan actual") ─────────────────
+    if _sc_active_qtys:
+        st.divider()
+        _sc_total_units = sum(_sc_active_qtys.values())
+        st.subheader(
+            f"Escenario activo — {len(_sc_active_qtys)} variantes · {_sc_total_units:,} unidades"
+        )
+        _sc_adj_df = finished[
+            finished["Código de barras principal"].isin(_sc_active_qtys.keys())
+        ][["Referencia interna", "Nombre", "Color", "Talla",
+           "Código de barras principal"]].copy()
+        _sc_adj_df["Cantidad"] = _sc_adj_df["Código de barras principal"].map(_sc_active_qtys)
+
+        _scf1, _scf2 = st.columns(2)
+        with _scf1:
+            _sc_adj_colors = st.multiselect(
+                "Filtrar por color",
+                sorted(_sc_adj_df["Color"].dropna().unique().tolist()),
+                key="sc_adj_colors",
+                placeholder="Todos los colores",
+            )
+        with _scf2:
+            _sc_adj_tallas = st.multiselect(
+                "Filtrar por talla",
+                sorted(_sc_adj_df["Talla"].dropna().unique().tolist(), key=_sz_key),
+                key="sc_adj_tallas",
+                placeholder="Todas las tallas",
+            )
+
+        _sc_sub_adj = _sc_adj_df.copy()
+        if _sc_adj_colors:
+            _sc_sub_adj = _sc_sub_adj[_sc_sub_adj["Color"].isin(_sc_adj_colors)]
+        if _sc_adj_tallas:
+            _sc_sub_adj = _sc_sub_adj[_sc_sub_adj["Talla"].isin(_sc_adj_tallas)]
+
+        st.caption(
+            f"{len(_sc_sub_adj)} de {len(_sc_adj_df)} variantes en vista · "
+            f"{int(_sc_sub_adj['Cantidad'].sum()):,} unidades"
+        )
+        st.dataframe(
+            _sc_sub_adj[["Referencia interna", "Nombre", "Color", "Talla", "Cantidad"]]
+            .rename(columns={"Referencia interna": "Referencia"})
+            .sort_values(["Nombre", "Color", "Talla"])
+            .reset_index(drop=True),
+            hide_index=True,
+            use_container_width=True,
+            height=min(420, 38 + len(_sc_sub_adj) * 35),
+        )
+
+        _sab1, _sab2, _sab3, _sasep, _sab4, _sab5, _sab6, _sasep2, _sab7 = st.columns(
+            [1, 1, 1, 0.3, 1, 1, 1, 0.3, 1.5]
+        )
+        if _sab1.button("− 10", key="sc_adj_m10", use_container_width=True):
+            _sc_bulk_apply(_sc_sub_adj, -10)
+        if _sab2.button("− 5",  key="sc_adj_m5",  use_container_width=True):
+            _sc_bulk_apply(_sc_sub_adj, -5)
+        if _sab3.button("− 1",  key="sc_adj_m1",  use_container_width=True):
+            _sc_bulk_apply(_sc_sub_adj, -1)
+        if _sab4.button("+ 1",  key="sc_adj_p1",  use_container_width=True):
+            _sc_bulk_apply(_sc_sub_adj, +1)
+        if _sab5.button("+ 5",  key="sc_adj_p5",  use_container_width=True):
+            _sc_bulk_apply(_sc_sub_adj, +5)
+        if _sab6.button("+ 10", key="sc_adj_p10", use_container_width=True):
+            _sc_bulk_apply(_sc_sub_adj, +10)
+        if _sab7.button("Poner a 0", key="sc_adj_zero", use_container_width=True):
+            _sc_bulk_apply(_sc_sub_adj, None)
+        st.divider()
+
     # ── Quantity matrix ───────────────────────────────────────────────────────
     _bom_covered_sc = set(active_bom_sc["Cod Barras Variante"].unique())
 
@@ -3352,6 +3422,21 @@ with tab3:
                 f'<div class="{cls}">{row_total if row_total > 0 else "—"}</div>',
                 unsafe_allow_html=True,
             )
+
+        # Totals row (mirrors Tab1 behaviour)
+        tcols = st.columns(ratios)
+        tcols[0].markdown('<div class="tot-lbl">Total</div>', unsafe_allow_html=True)
+        sc_grand = sum(col_totals)
+        for ci, ct in enumerate(col_totals):
+            cls = "tot-val" if ct > 0 else "tot-zero"
+            tcols[ci + 1].markdown(
+                f'<div class="{cls}">{ct if ct > 0 else "—"}</div>',
+                unsafe_allow_html=True,
+            )
+        tcols[-1].markdown(
+            f'<div class="grand-tot">{sc_grand if sc_grand > 0 else "—"}</div>',
+            unsafe_allow_html=True,
+        )
 
     # ── Calculate ─────────────────────────────────────────────────────────────
     st.divider()
