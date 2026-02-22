@@ -2956,28 +2956,49 @@ with tab3:
 
     active_bom_sc = st.session_state.get("custom_bom", bom)
 
+    # Active simulator quantities (sc_qty_* keys)
+    _sc_active_qtys = {
+        k[7:]: int(v)
+        for k, v in st.session_state.items()
+        if k.startswith("sc_qty_") and isinstance(v, (int, float)) and int(v) > 0
+    }
+    _sc_filter_pool = (
+        finished[finished["Código de barras principal"].isin(_sc_active_qtys.keys())]
+        if _sc_active_qtys else finished.iloc[:0]
+    )
+
     # ── Filters ──────────────────────────────────────────────────────────────
     sc_c1, sc_c2, sc_c3, sc_c4 = st.columns([3, 2, 2, 2])
     with sc_c1:
         sc_q = st.text_input("Buscar por nombre", placeholder="ej. Vestido Goya…", key="sc_q")
     with sc_c2:
         sc_color = st.selectbox(
-            "Color", ["Todos"] + sorted(finished["Color"].dropna().unique().tolist()), key="sc_color"
+            "Color", ["Todos"] + sorted(_sc_filter_pool["Color"].dropna().unique().tolist()), key="sc_color"
         )
     with sc_c3:
         sc_talla = st.selectbox(
             "Talla",
-            ["Todas"] + sorted(finished["Talla"].dropna().unique().tolist(), key=_sz_key),
+            ["Todas"] + sorted(_sc_filter_pool["Talla"].dropna().unique().tolist(), key=_sz_key),
             key="sc_talla",
         )
     with sc_c4:
         sc_ref = st.selectbox(
             "Referencia",
-            ["Todas"] + sorted(finished["Referencia interna"].dropna().unique().tolist()),
+            ["Todas"] + sorted(_sc_filter_pool["Referencia interna"].dropna().unique().tolist()),
             key="sc_ref",
         )
 
-    sc_df = finished.copy()
+    _sc_has_filter = bool(
+        sc_q or sc_color != "Todos" or sc_talla != "Todas" or sc_ref != "Todas"
+    )
+
+    if _sc_active_qtys:
+        sc_df = finished[finished["Código de barras principal"].isin(_sc_active_qtys.keys())].copy()
+    elif sc_q:
+        sc_df = finished.copy()
+    else:
+        sc_df = finished.iloc[:0].copy()
+
     if sc_q:
         sc_df = sc_df[sc_df["Nombre"].str.contains(sc_q, case=False, na=False)]
     if sc_color != "Todos":
@@ -3036,6 +3057,12 @@ with tab3:
 
     # ── Quantity matrix ───────────────────────────────────────────────────────
     _bom_covered_sc = set(active_bom_sc["Cod Barras Variante"].unique())
+
+    if sc_df.empty:
+        st.info(
+            "Usa los filtros para buscar una referencia e introducir cantidades hipotéticas, "
+            "o usa la asignación masiva."
+        )
 
     for (ref, nombre), grp in sc_df.groupby(["Referencia interna", "Nombre"], sort=True):
         colors = sorted(grp["Color"].dropna().unique().tolist())
