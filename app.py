@@ -1378,8 +1378,9 @@ DOCUMENTO A ANALIZAR:
                     "Cantidad necesaria": round(total_qty, 4),
                 })
 
+            _cols = ["Referencia", "Nombre", "Color", "Talla", "Código de barras", "Cantidad necesaria"]
             st.session_state["results_df"] = (
-                pd.DataFrame(results)
+                pd.DataFrame(results, columns=_cols)
                 .sort_values(["Nombre", "Color", "Talla"])
                 .reset_index(drop=True)
             )
@@ -1395,8 +1396,11 @@ DOCUMENTO A ANALIZAR:
                     "Código de barras": bc,
                     "Unidades": qty,
                 })
+            _plan_cols = ["Referencia", "Nombre", "Color", "Talla", "Código de barras", "Unidades"]
             st.session_state["plan_df"] = (
-                pd.DataFrame(plan_rows).sort_values(["Nombre", "Color", "Talla"])
+                pd.DataFrame(plan_rows, columns=_plan_cols)
+                .sort_values(["Nombre", "Color", "Talla"])
+                .reset_index(drop=True)
             )
 
     # ── Results (persistent — survive widget interactions) ───────────────────
@@ -1530,6 +1534,15 @@ with tab2:
                     BOM_SESSION_FILE.read_text("utf-8")
                 )
                 if st.session_state["bom_draft"]:
+                    # Also rebuild custom_bom so calculations work immediately
+                    st.session_state["custom_bom"] = pd.DataFrame([
+                        {
+                            "Cod Barras Variante": e["Cod Barras Variante"],
+                            "EAN Componente": e["EAN Componente"],
+                            "Cantidad": float(e["Cantidad"]),
+                        }
+                        for e in st.session_state["bom_draft"]
+                    ])
                     st.info(
                         f"Se ha restaurado la BOM de la sesión anterior "
                         f"({len(st.session_state['bom_draft'])} entradas).",
