@@ -167,10 +167,13 @@ BOM_PATH = os.path.join(BASE_DIR, "listamateriales.xlsx")
 @st.cache_data
 def load_data():
     variantes = pd.read_excel(VARIANTES_PATH, sheet_name="Variantes de producto", dtype=str)
-    bom = pd.read_excel(BOM_PATH, sheet_name="Fichero ejemplo")
 
-    bom["Cod Barras Variante"] = bom["Cod Barras Variante"].astype(str).str.strip()
-    bom["EAN Componente"] = bom["EAN Componente"].astype(str).str.strip()
+    if os.path.exists(BOM_PATH):
+        bom = pd.read_excel(BOM_PATH, sheet_name="Fichero ejemplo")
+        bom["Cod Barras Variante"] = bom["Cod Barras Variante"].astype(str).str.strip()
+        bom["EAN Componente"] = bom["EAN Componente"].astype(str).str.strip()
+    else:
+        bom = pd.DataFrame(columns=["Cod Barras Variante", "EAN Componente", "Cantidad"])
     variantes["Código de barras principal"] = (
         variantes["Código de barras principal"].astype(str).str.strip()
     )
@@ -667,13 +670,19 @@ tab1, tab2, tab3 = st.tabs(["Plan de producción", "Crear / Editar BOM", "Simula
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab1:
 
-    # Indicator when a custom BOM is active
+    # Indicator: custom BOM active / no BOM loaded at all
     if st.session_state.get("custom_bom") is not None:
         n_lines = len(st.session_state["custom_bom"])
         st.info(
             f"BOM personalizada activa ({n_lines} entradas). "
-            "El cálculo usará esta BOM en lugar de la BOM por defecto. "
+            "El cálculo usará esta BOM. "
             "Ve a la pestaña 'Crear / Editar BOM' para modificarla o desactivarla."
+        )
+    elif bom.empty:
+        st.warning(
+            "No hay ninguna Lista de Materiales (BOM) cargada. "
+            "Ve a **Crear / Editar BOM**, sube tu fichero Excel y pulsa "
+            "**Usar esta BOM para calcular** antes de ejecutar el cálculo."
         )
 
     # ── Bulk assignment helper ────────────────────────────────────────────────
@@ -1541,47 +1550,53 @@ with tab2:
 
     # ── Load existing BOM as starting point ──────────────────────────────────
     with st.expander("Cargar BOM existente como base de partida"):
-        lc1, lc2 = st.columns(2)
+        _bom_file_exists = os.path.exists(BOM_PATH) and not bom.empty
 
-        with lc1:
-            st.markdown("**Cargar la BOM por defecto** (`listamateriales.xlsx`)")
-            if st.button("Cargar BOM por defecto", use_container_width=True):
-                entries = []
-                for _, row in bom.iterrows():
-                    bc_var = str(row["Cod Barras Variante"])
-                    bc_comp = str(row["EAN Componente"])
-                    qty = float(row["Cantidad"])
-                    var_info = barcode_lookup.get(bc_var, {})
-                    comp_info = barcode_lookup.get(bc_comp, {})
-                    var_label = " | ".join(
-                        x for x in [
-                            str(var_info.get("Referencia interna", "")).strip(),
-                            str(var_info.get("Nombre", bc_var)).strip(),
-                            str(var_info.get("Color", "")).strip(),
-                            str(var_info.get("Talla", "")).strip(),
-                        ] if x and x != "nan"
-                    ) or bc_var
-                    comp_label = " | ".join(
-                        x for x in [
-                            str(comp_info.get("Referencia interna", "")).strip(),
-                            str(comp_info.get("Nombre", bc_comp)).strip(),
-                            str(comp_info.get("Color", "")).strip(),
-                            str(comp_info.get("Talla", "")).strip(),
-                        ] if x and x != "nan"
-                    ) or bc_comp
-                    entries.append({
-                        "Cod Barras Variante": bc_var,
-                        "EAN Componente": bc_comp,
-                        "Cantidad": qty,
-                        "_nombre_variante": var_label,
-                        "_nombre_componente": comp_label,
-                    })
-                st.session_state["bom_draft"] = entries
-                st.success(f"BOM cargada: {len(entries)} entradas.")
-                st.rerun()
+        if _bom_file_exists:
+            lc1, lc2 = st.columns(2)
+        else:
+            lc1, lc2 = None, st.container()
+
+        if _bom_file_exists:
+            with lc1:
+                st.markdown("**Cargar la BOM instalada** (`listamateriales.xlsx`)")
+                if st.button("Cargar BOM instalada", use_container_width=True):
+                    entries = []
+                    for _, row in bom.iterrows():
+                        bc_var = str(row["Cod Barras Variante"])
+                        bc_comp = str(row["EAN Componente"])
+                        qty = float(row["Cantidad"])
+                        var_info = barcode_lookup.get(bc_var, {})
+                        comp_info = barcode_lookup.get(bc_comp, {})
+                        var_label = " | ".join(
+                            x for x in [
+                                str(var_info.get("Referencia interna", "")).strip(),
+                                str(var_info.get("Nombre", bc_var)).strip(),
+                                str(var_info.get("Color", "")).strip(),
+                                str(var_info.get("Talla", "")).strip(),
+                            ] if x and x != "nan"
+                        ) or bc_var
+                        comp_label = " | ".join(
+                            x for x in [
+                                str(comp_info.get("Referencia interna", "")).strip(),
+                                str(comp_info.get("Nombre", bc_comp)).strip(),
+                                str(comp_info.get("Color", "")).strip(),
+                                str(comp_info.get("Talla", "")).strip(),
+                            ] if x and x != "nan"
+                        ) or bc_comp
+                        entries.append({
+                            "Cod Barras Variante": bc_var,
+                            "EAN Componente": bc_comp,
+                            "Cantidad": qty,
+                            "_nombre_variante": var_label,
+                            "_nombre_componente": comp_label,
+                        })
+                    st.session_state["bom_draft"] = entries
+                    st.success(f"BOM cargada: {len(entries)} entradas.")
+                    st.rerun()
 
         with lc2:
-            st.markdown("**O sube un fichero Excel** (mismo formato que `listamateriales.xlsx`)")
+            st.markdown("**Sube un fichero Excel** con columnas `Cod Barras Variante`, `EAN Componente`, `Cantidad`")
             uploaded = st.file_uploader(
                 "Fichero Excel",
                 type=["xlsx"],
