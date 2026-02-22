@@ -164,14 +164,67 @@ VARIANTES_PATH = os.path.join(BASE_DIR, "Variantes.xlsx")
 BOM_PATH = os.path.join(BASE_DIR, "listamateriales.xlsx")
 
 
+def _normalize_bom_df(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Normalize a raw BOM DataFrame to the internal schema.
+
+    Accepted column names
+    ---------------------
+    Finished-product EAN : "Cod Barras Variante", "Nombre de producto",
+                            "EAN Variante", "Barcode", "EAN"  (first match wins)
+    Component EAN        : "EAN Componente", "EAN componente",
+                            "Componente", "EAN Comp"          (first match wins)
+    Quantity             : "Cantidad", "Qty", "Quantity"       (first match wins)
+    """
+    cols = list(df.columns)
+    def _pick(candidates):
+        for c in candidates:
+            for col in cols:
+                if col.strip().lower() == c.lower():
+                    return col
+        return None
+
+    var_col  = _pick(["Cod Barras Variante", "Nombre de producto",
+                       "EAN Variante", "Barcode", "EAN Variante Producto", "EAN"])
+    comp_col = _pick(["EAN Componente", "EAN componente", "Componente", "EAN Comp"])
+    qty_col  = _pick(["Cantidad", "Qty", "Quantity"])
+
+    missing = [name for name, col in [("EAN prenda terminada", var_col),
+                                        ("EAN componente", comp_col),
+                                        ("Cantidad", qty_col)] if col is None]
+    if missing:
+        raise ValueError(
+            f"No se encontraron las columnas: {', '.join(missing)}. "
+            f"Columnas disponibles: {', '.join(cols)}"
+        )
+
+    df = df[[var_col, comp_col, qty_col]].copy()
+    df.columns = ["Cod Barras Variante", "EAN Componente", "Cantidad"]
+
+    def _clean_ean(s):
+        s = s.astype(str).str.strip()
+        # Remove trailing ".0" from numbers read as float
+        s = s.str.replace(r"\.0+$", "", regex=True)
+        return s
+
+    df["Cod Barras Variante"] = _clean_ean(df["Cod Barras Variante"])
+    df["EAN Componente"]      = _clean_ean(df["EAN Componente"])
+    df["Cantidad"]            = pd.to_numeric(df["Cantidad"], errors="coerce").fillna(0)
+    return df.dropna(subset=["Cod Barras Variante", "EAN Componente"])
+
+
 @st.cache_data
 def load_data():
     variantes = pd.read_excel(VARIANTES_PATH, sheet_name="Variantes de producto", dtype=str)
 
     if os.path.exists(BOM_PATH):
-        bom = pd.read_excel(BOM_PATH, sheet_name="Fichero ejemplo")
-        bom["Cod Barras Variante"] = bom["Cod Barras Variante"].astype(str).str.strip()
-        bom["EAN Componente"] = bom["EAN Componente"].astype(str).str.strip()
+        try:
+            _raw_bom = pd.read_excel(BOM_PATH, sheet_name="Fichero ejemplo")
+        except Exception:
+            _raw_bom = pd.read_excel(BOM_PATH)
+        try:
+            bom = _normalize_bom_df(_raw_bom)
+        except Exception:
+            bom = pd.DataFrame(columns=["Cod Barras Variante", "EAN Componente", "Cantidad"])
     else:
         bom = pd.DataFrame(columns=["Cod Barras Variante", "EAN Componente", "Cantidad"])
     variantes["Código de barras principal"] = (
@@ -1799,7 +1852,11 @@ with tab2:
                     st.rerun()
 
         with lc2:
-            st.markdown("**Sube un fichero Excel** con columnas `Cod Barras Variante`, `EAN Componente`, `Cantidad`")
+            st.markdown(
+                "**Sube el fichero Excel de lista de materiales.**  \n"
+                "Se detectan automáticamente las columnas: EAN prenda terminada "
+                "(`Nombre de producto` o `Cod Barras Variante`), `EAN Componente` y `Cantidad`."
+            )
             uploaded = st.file_uploader(
                 "Fichero Excel",
                 type=["xlsx"],
@@ -1809,22 +1866,36 @@ with tab2:
             if uploaded is not None:
                 if st.button("Cargar fichero subido", use_container_width=True):
                     try:
-                        uploaded_df = pd.read_excel(uploaded)
-                        uploaded_df["Cod Barras Variante"] = (
-                            uploaded_df["Cod Barras Variante"].astype(str).str.strip()
-                        )
-                        uploaded_df["EAN Componente"] = (
-                            uploaded_df["EAN Componente"].astype(str).str.strip()
-                        )
+                        _raw = pd.read_excel(uploaded)
+                        uploaded_df = _normalize_bom_df(_raw)
                         entries = []
+                        _unmatched_var, _unmatched_comp = set(), set()
                         for _, row in uploaded_df.iterrows():
-                            bc_var = str(row["Cod Barras Variante"])
+                            bc_var  = str(row["Cod Barras Variante"])
                             bc_comp = str(row["EAN Componente"])
-                            qty = float(row["Cantidad"])
-                            var_info = barcode_lookup.get(bc_var, {})
+                            qty     = float(row["Cantidad"])
+                            var_info  = barcode_lookup.get(bc_var, {})
                             comp_info = barcode_lookup.get(bc_comp, {})
-                            var_label = str(var_info.get("Nombre", bc_var))
-                            comp_label = str(comp_info.get("Nombre", bc_comp))
+                            if not var_info:
+                                _unmatched_var.add(bc_var)
+                            if not comp_info:
+                                _unmatched_comp.add(bc_comp)
+                            var_label = " | ".join(
+                                x for x in [
+                                    str(var_info.get("Referencia interna", "")).strip(),
+                                    str(var_info.get("Nombre", bc_var)).strip(),
+                                    str(var_info.get("Color", "")).strip(),
+                                    str(var_info.get("Talla", "")).strip(),
+                                ] if x and x != "nan"
+                            ) or bc_var
+                            comp_label = " | ".join(
+                                x for x in [
+                                    str(comp_info.get("Referencia interna", "")).strip(),
+                                    str(comp_info.get("Nombre", bc_comp)).strip(),
+                                    str(comp_info.get("Color", "")).strip(),
+                                    str(comp_info.get("Talla", "")).strip(),
+                                ] if x and x != "nan"
+                            ) or bc_comp
                             entries.append({
                                 "Cod Barras Variante": bc_var,
                                 "EAN Componente": bc_comp,
@@ -1833,7 +1904,18 @@ with tab2:
                                 "_nombre_componente": comp_label,
                             })
                         st.session_state["bom_draft"] = entries
-                        st.success(f"Fichero cargado: {len(entries)} entradas.")
+                        msg = f"Fichero cargado: {len(entries)} entradas."
+                        if _unmatched_var:
+                            msg += (
+                                f" **{len(_unmatched_var)} EAN de prenda no reconocidos** "
+                                f"en el catálogo (p.ej. {next(iter(_unmatched_var))})."
+                            )
+                        if _unmatched_comp:
+                            msg += (
+                                f" **{len(_unmatched_comp)} EAN de componente no reconocidos** "
+                                f"(p.ej. {next(iter(_unmatched_comp))})."
+                            )
+                        st.success(msg)
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error al leer el fichero: {e}")
