@@ -737,7 +737,10 @@ with tab1:
     if sel_ref != "Todas":
         df = df[df["Referencia interna"] == sel_ref]
 
-    st.caption(f"{len(df)} variantes mostradas")
+    _has_filter = bool(
+        q or sel_color != "Todos" or sel_talla != "Todas" or sel_ref != "Todas"
+    )
+    st.caption(f"{len(df)} variantes coinciden con el filtro")
 
     # ── Bulk assignment ───────────────────────────────────────────────────────
     with st.expander("Asignación masiva por talla / color", expanded=False):
@@ -1182,7 +1185,24 @@ DOCUMENTO A ANALIZAR:
     _bom_covered = set(_active_bom_cov["Cod Barras Variante"].unique())
 
     # ── Matrix view ──────────────────────────────────────────────────────────
-    for (ref, nombre), grp in df.groupby(["Referencia interna", "Nombre"], sort=True):
+    # Scope: only variants with quantities assigned (from the imported file).
+    # If nothing imported yet, show filter results (allows manual entry).
+    # Without import AND without filter: show nothing, prompt to import.
+    if _active_qtys:
+        _matrix_df = df[df["Código de barras principal"].isin(_active_qtys.keys())]
+    elif _has_filter:
+        _matrix_df = df
+    else:
+        _matrix_df = df.iloc[:0]  # empty
+
+    if _matrix_df.empty:
+        st.info(
+            "Aún no hay variantes en el plan. "
+            "**Importa un fichero** con las cantidades (columna Código de barras + Cantidad) "
+            "o usa los filtros de arriba para buscar una referencia y añadirla manualmente."
+        )
+
+    for (ref, nombre), grp in _matrix_df.groupby(["Referencia interna", "Nombre"], sort=True):
         colors = sorted(grp["Color"].dropna().unique().tolist())
         tallas = sorted(grp["Talla"].dropna().unique().tolist(), key=_sz_key)
 
