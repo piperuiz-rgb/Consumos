@@ -761,11 +761,17 @@ with tab1:
         for k, v in st.session_state.items()
         if k.startswith("qty_") and isinstance(v, (int, float)) and int(v) > 0
     }
-    # Filter selectbox options are scoped to the active plan.
-    # Without a plan the matrix is empty, so no options are needed.
+    # BOM-derived variants: EANs present in the loaded BOM (qty may still be 0)
+    _custom_bom_now = st.session_state.get("custom_bom", bom)
+    _bom_eans = (
+        set(_custom_bom_now["Cod Barras Variante"].astype(str).str.strip().unique())
+        if not _custom_bom_now.empty else set()
+    )
+    # Pool = union of active-qty variants and BOM variants
+    _plan_barcodes = set(_active_qtys.keys()) | _bom_eans
     _filter_pool = (
-        finished[finished["Código de barras principal"].isin(_active_qtys.keys())]
-        if _active_qtys else finished.iloc[:0]
+        finished[finished["Código de barras principal"].isin(_plan_barcodes)]
+        if _plan_barcodes else finished.iloc[:0]
     )
 
     # ── SECTION 1 — Filters ──────────────────────────────────────────────────
@@ -801,8 +807,8 @@ with tab1:
     # · Active plan → start from its variants (small).
     # · No plan + text search → search the full catalog (user is looking for a ref).
     # · No plan + no search → empty; nothing to show, no heavy copy needed.
-    if _active_qtys:
-        df = finished[finished["Código de barras principal"].isin(_active_qtys.keys())].copy()
+    if _plan_barcodes:
+        df = finished[finished["Código de barras principal"].isin(_plan_barcodes)].copy()
     elif q:
         df = finished.copy()
     else:
@@ -1362,11 +1368,10 @@ DOCUMENTO A ANALIZAR:
     _bom_covered = set(_active_bom_cov["Cod Barras Variante"].unique())
 
     # ── Matrix view ──────────────────────────────────────────────────────────
-    # Scope: only variants with quantities assigned (from the imported file).
-    # If nothing imported yet, show filter results (allows manual entry).
-    # Without import AND without filter: show nothing, prompt to import.
-    if _active_qtys:
-        _matrix_df = df[df["Código de barras principal"].isin(_active_qtys.keys())]
+    # Show all variants in the plan pool (BOM variants + active-qty variants).
+    # Fall back to filter results for manual discovery when no BOM is loaded.
+    if _plan_barcodes:
+        _matrix_df = df
     elif _has_filter:
         _matrix_df = df
     else:
@@ -1375,8 +1380,8 @@ DOCUMENTO A ANALIZAR:
     if _matrix_df.empty:
         st.info(
             "Aún no hay variantes en el plan. "
-            "**Importa un fichero** con las cantidades (columna Código de barras + Cantidad) "
-            "o usa los filtros de arriba para buscar una referencia y añadirla manualmente."
+            "**Importa la lista de materiales** desde el expander de arriba, "
+            "o usa el buscador para encontrar una referencia y añadirla manualmente."
         )
 
     for (ref, nombre), grp in _matrix_df.groupby(["Referencia interna", "Nombre"], sort=True):
