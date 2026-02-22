@@ -708,11 +708,11 @@ with tab1:
         for k, v in st.session_state.items()
         if k.startswith("qty_") and isinstance(v, (int, float)) and int(v) > 0
     }
-    # Base pool for filter options: only the active plan variants (fast), or
-    # all finished products when nothing has been imported yet.
+    # Filter selectbox options are scoped to the active plan.
+    # Without a plan the matrix is empty, so no options are needed.
     _filter_pool = (
         finished[finished["Código de barras principal"].isin(_active_qtys.keys())]
-        if _active_qtys else finished
+        if _active_qtys else finished.iloc[:0]
     )
 
     # ── SECTION 1 — Filters ──────────────────────────────────────────────────
@@ -740,7 +740,21 @@ with tab1:
             ["Todas"] + sorted(_filter_pool["Referencia interna"].dropna().unique().tolist()),
         )
 
-    df = finished.copy()
+    _has_filter = bool(
+        q or sel_color != "Todos" or sel_talla != "Todas" or sel_ref != "Todas"
+    )
+
+    # Base for df:
+    # · Active plan → start from its variants (small).
+    # · No plan + text search → search the full catalog (user is looking for a ref).
+    # · No plan + no search → empty; nothing to show, no heavy copy needed.
+    if _active_qtys:
+        df = finished[finished["Código de barras principal"].isin(_active_qtys.keys())].copy()
+    elif q:
+        df = finished.copy()
+    else:
+        df = finished.iloc[:0].copy()
+
     if q:
         df = df[df["Nombre"].str.contains(q, case=False, na=False)]
     if sel_color != "Todos":
@@ -750,9 +764,6 @@ with tab1:
     if sel_ref != "Todas":
         df = df[df["Referencia interna"] == sel_ref]
 
-    _has_filter = bool(
-        q or sel_color != "Todos" or sel_talla != "Todas" or sel_ref != "Todas"
-    )
     st.caption(f"{len(df)} variantes coinciden con el filtro")
 
     # ── Bulk assignment ───────────────────────────────────────────────────────
