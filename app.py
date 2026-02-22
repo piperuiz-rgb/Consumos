@@ -825,47 +825,6 @@ with tab1:
 
     st.caption(f"{len(df)} variantes coinciden con el filtro")
 
-    # ── Bulk assignment ───────────────────────────────────────────────────────
-    with st.expander("Asignación masiva por talla / color", expanded=False):
-        mc1, mc2 = st.columns(2)
-        with mc1:
-            bulk_tallas = st.multiselect(
-                "Filtrar por talla",
-                sorted(df["Talla"].dropna().unique().tolist(), key=_sz_key),
-                placeholder="Todas las tallas visibles",
-            )
-        with mc2:
-            bulk_colors = st.multiselect(
-                "Filtrar por color",
-                sorted(df["Color"].dropna().unique().tolist()),
-                placeholder="Todos los colores visibles",
-            )
-
-        sub_bulk = df.copy()
-        if bulk_tallas:
-            sub_bulk = sub_bulk[sub_bulk["Talla"].isin(bulk_tallas)]
-        if bulk_colors:
-            sub_bulk = sub_bulk[sub_bulk["Color"].isin(bulk_colors)]
-        st.caption(f"Afecta a **{len(sub_bulk)}** de {len(df)} variantes visibles")
-
-        bc1, bc2, bc3, _s, bc4, bc5, bc6, _s2, bc7 = st.columns(
-            [1, 1, 1, 0.3, 1, 1, 1, 0.3, 1.4]
-        )
-        if bc1.button("− 10", use_container_width=True):
-            _bulk_apply(sub_bulk, -10)
-        if bc2.button("− 5", use_container_width=True):
-            _bulk_apply(sub_bulk, -5)
-        if bc3.button("− 1", use_container_width=True):
-            _bulk_apply(sub_bulk, -1)
-        if bc4.button("+ 1", use_container_width=True):
-            _bulk_apply(sub_bulk, 1)
-        if bc5.button("+ 5", use_container_width=True):
-            _bulk_apply(sub_bulk, 5)
-        if bc6.button("+ 10", use_container_width=True):
-            _bulk_apply(sub_bulk, 10)
-        if bc7.button("Poner a 0", use_container_width=True):
-            _bulk_apply(sub_bulk, None)
-
     # ── Import plan from Excel / CSV ─────────────────────────────────────────
     with st.expander("Importar plan desde Excel / CSV", expanded=False):
         st.markdown(
@@ -1272,6 +1231,48 @@ DOCUMENTO A ANALIZAR:
                         use_container_width=True,
                         hide_index=True,
                     )
+
+    # ── Bulk assignment ───────────────────────────────────────────────────────
+    if _plan_barcodes:
+        with st.expander("Asignación masiva por talla / color", expanded=False):
+            mc1, mc2 = st.columns(2)
+            with mc1:
+                bulk_tallas = st.multiselect(
+                    "Filtrar por talla",
+                    sorted(df["Talla"].dropna().unique().tolist(), key=_sz_key),
+                    placeholder="Todas las tallas visibles",
+                )
+            with mc2:
+                bulk_colors = st.multiselect(
+                    "Filtrar por color",
+                    sorted(df["Color"].dropna().unique().tolist()),
+                    placeholder="Todos los colores visibles",
+                )
+
+            sub_bulk = df.copy()
+            if bulk_tallas:
+                sub_bulk = sub_bulk[sub_bulk["Talla"].isin(bulk_tallas)]
+            if bulk_colors:
+                sub_bulk = sub_bulk[sub_bulk["Color"].isin(bulk_colors)]
+            st.caption(f"Afecta a **{len(sub_bulk)}** de {len(df)} variantes visibles")
+
+            bc1, bc2, bc3, _s, bc4, bc5, bc6, _s2, bc7 = st.columns(
+                [1, 1, 1, 0.3, 1, 1, 1, 0.3, 1.4]
+            )
+            if bc1.button("− 10", use_container_width=True):
+                _bulk_apply(sub_bulk, -10)
+            if bc2.button("− 5", use_container_width=True):
+                _bulk_apply(sub_bulk, -5)
+            if bc3.button("− 1", use_container_width=True):
+                _bulk_apply(sub_bulk, -1)
+            if bc4.button("+ 1", use_container_width=True):
+                _bulk_apply(sub_bulk, 1)
+            if bc5.button("+ 5", use_container_width=True):
+                _bulk_apply(sub_bulk, 5)
+            if bc6.button("+ 10", use_container_width=True):
+                _bulk_apply(sub_bulk, 10)
+            if bc7.button("Poner a 0", use_container_width=True):
+                _bulk_apply(sub_bulk, None)
 
     # ── Quick-adjust: plan actual ─────────────────────────────────────────────
     # _active_qtys already computed at top of tab1 (before filter widgets).
