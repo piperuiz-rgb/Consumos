@@ -702,6 +702,19 @@ with tab1:
             cur = st.session_state.get(sk, 0)
             st.session_state[sk] = 0 if delta is None else max(0, cur + delta)
 
+    # ── Active plan (computed early so filters can be scoped to it) ───────────
+    _active_qtys = {
+        k[4:]: int(v)
+        for k, v in st.session_state.items()
+        if k.startswith("qty_") and isinstance(v, (int, float)) and int(v) > 0
+    }
+    # Base pool for filter options: only the active plan variants (fast), or
+    # all finished products when nothing has been imported yet.
+    _filter_pool = (
+        finished[finished["Código de barras principal"].isin(_active_qtys.keys())]
+        if _active_qtys else finished
+    )
+
     # ── SECTION 1 — Filters ──────────────────────────────────────────────────
     st.header("1. Plan de producción")
     st.markdown(
@@ -714,17 +727,17 @@ with tab1:
         q = st.text_input("Buscar por nombre", placeholder="ej. Vestido Goya…")
     with col2:
         sel_color = st.selectbox(
-            "Color", ["Todos"] + sorted(finished["Color"].dropna().unique().tolist())
+            "Color", ["Todos"] + sorted(_filter_pool["Color"].dropna().unique().tolist())
         )
     with col3:
         sel_talla = st.selectbox(
             "Talla",
-            ["Todas"] + sorted(finished["Talla"].dropna().unique().tolist(), key=_sz_key),
+            ["Todas"] + sorted(_filter_pool["Talla"].dropna().unique().tolist(), key=_sz_key),
         )
     with col4:
         sel_ref = st.selectbox(
             "Referencia",
-            ["Todas"] + sorted(finished["Referencia interna"].dropna().unique().tolist()),
+            ["Todas"] + sorted(_filter_pool["Referencia interna"].dropna().unique().tolist()),
         )
 
     df = finished.copy()
@@ -1089,11 +1102,9 @@ DOCUMENTO A ANALIZAR:
                     )
 
     # ── Quick-adjust: plan actual ─────────────────────────────────────────────
-    _active_qtys = {
-        k[4:]: int(v)
-        for k, v in st.session_state.items()
-        if k.startswith("qty_") and isinstance(v, (int, float)) and int(v) > 0
-    }
+    # _active_qtys already computed at top of tab1 (before filter widgets).
+    # All import paths call st.rerun() after setting qty_* values, so the
+    # top-level computation is always up-to-date when we reach this point.
     _calc_from_adj = False  # may be set to True by the button below
 
     if _active_qtys:
