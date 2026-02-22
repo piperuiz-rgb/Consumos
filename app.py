@@ -863,9 +863,12 @@ with tab1:
     # ── Import plan from Excel / CSV ─────────────────────────────────────────
     with st.expander("Importar plan desde Excel / CSV", expanded=False):
         st.markdown(
-            "El fichero debe tener al menos dos columnas: una con el **código de barras** "
-            "y otra con las **unidades** a producir. "
-            "Se aceptan nombres de columna en español o inglés."
+            "Acepta dos tipos de fichero:\n"
+            "- **Lista de materiales** (BOM): columnas `Nombre de producto` / `Cod Barras Variante`, "
+            "`EAN Componente`, `Cantidad` — carga la estructura de materiales y muestra las prendas "
+            "de la colección para que introduzcas las unidades a producir.\n"
+            "- **Plan de producción**: columnas `Código de barras` y `Unidades` — importa "
+            "directamente las cantidades."
         )
         up_plan = st.file_uploader(
             "Fichero Excel o CSV",
@@ -874,80 +877,179 @@ with tab1:
             label_visibility="collapsed",
         )
         if up_plan is not None:
-            # Parse immediately to show preview
             try:
                 if up_plan.name.lower().endswith(".csv"):
                     _df_imp = pd.read_csv(up_plan, dtype=str)
                 else:
                     _df_imp = pd.read_excel(up_plan, dtype=str)
 
-                _bc_col_imp = next(
-                    (c for c in _df_imp.columns
-                     if any(k in c.lower() for k in ("barras", "ean", "barcode", "código", "codigo"))),
-                    _df_imp.columns[0],
-                )
-                _qty_col_imp = next(
-                    (c for c in _df_imp.columns
-                     if any(k in c.lower() for k in ("unidad", "cantidad", "qty", "units"))),
-                    _df_imp.columns[1] if len(_df_imp.columns) > 1 else _df_imp.columns[0],
+                # ── Detect file type: BOM vs production plan ──────────────────
+                _has_comp_col = any(
+                    "componente" in c.lower() or "ean comp" in c.lower()
+                    for c in _df_imp.columns
                 )
 
-                # Build preview rows
-                _prev_rows = []
-                for _, _imp_row in _df_imp.iterrows():
-                    _bc = str(_imp_row[_bc_col_imp]).strip()
+                if _has_comp_col:
+                    # ── BOM file ──────────────────────────────────────────────
                     try:
-                        _qty = int(float(str(_imp_row[_qty_col_imp]).strip()))
-                    except (ValueError, KeyError):
-                        continue
-                    if not _bc or _bc.lower() in ("nan", "none", ""):
-                        continue
-                    _info = barcode_lookup.get(_bc, {})
-                    _found = bool(_info)
-                    _prev_rows.append({
-                        "Estado": "✓" if _found else "✗ no encontrado",
-                        "Código de barras": _bc,
-                        "Nombre": _info.get("Nombre", "—"),
-                        "Color": _info.get("Color", "—"),
-                        "Talla": _info.get("Talla", "—"),
-                        "Unidades": _qty,
-                        "_ok": _found and _qty > 0,
-                    })
+                        _bom_imp = _normalize_bom_df(_df_imp)
+                    except ValueError as _ve:
+                        st.error(str(_ve))
+                        _bom_imp = None
 
-                if _prev_rows:
-                    _prev_df = pd.DataFrame(_prev_rows)
-                    _n_ok = _prev_df["_ok"].sum()
-                    _n_skip = len(_prev_df) - _n_ok
-                    st.caption(
-                        f"**{_n_ok}** variantes reconocidas"
-                        + (f" · {_n_skip} no encontradas en el catálogo (se ignorarán)" if _n_skip else "")
+                    if _bom_imp is not None and not _bom_imp.empty:
+                        # Unique finished-product EANs in the BOM
+                        _bom_eans = (
+                            _bom_imp["Cod Barras Variante"]
+                            .str.replace(r"\.0+$", "", regex=True)
+                            .str.strip()
+                            .unique()
+                        )
+                        _bom_prev = []
+                        for _bc in _bom_eans:
+                            _info = barcode_lookup.get(_bc, {})
+                            _n_comp = int((_bom_imp["Cod Barras Variante"] == _bc).sum())
+                            _bom_prev.append({
+                                "Estado": "✓" if _info else "✗ no encontrado",
+                                "Código de barras": _bc,
+                                "Nombre": _info.get("Nombre", "—"),
+                                "Color": _info.get("Color", "—"),
+                                "Talla": _info.get("Talla", "—"),
+                                "Componentes": _n_comp,
+                                "_ok": bool(_info),
+                            })
+                        _bom_prev_df = pd.DataFrame(_bom_prev)
+                        _n_ok_b = int(_bom_prev_df["_ok"].sum())
+                        _n_skip_b = len(_bom_prev_df) - _n_ok_b
+                        st.caption(
+                            f"Fichero de **lista de materiales** detectado — "
+                            f"**{_n_ok_b}** prendas reconocidas, "
+                            f"{len(_bom_imp)} líneas de componente"
+                            + (f" · {_n_skip_b} EAN no encontrados en el catálogo" if _n_skip_b else "")
+                        )
+                        st.dataframe(
+                            _bom_prev_df.drop(columns=["_ok"]),
+                            hide_index=True,
+                            use_container_width=True,
+                            height=min(300, 36 + len(_bom_prev_df) * 35),
+                        )
+                        if _n_ok_b > 0 and st.button(
+                            "Cargar lista de materiales",
+                            key="btn_import_bom",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            # Store as active BOM
+                            st.session_state["custom_bom"] = _bom_imp[
+                                ["Cod Barras Variante", "EAN Componente", "Cantidad"]
+                            ].copy()
+                            # Also sync to bom_draft for tab2
+                            _draft_entries = []
+                            for _, _dr in _bom_imp.iterrows():
+                                _v = str(_dr["Cod Barras Variante"])
+                                _c = str(_dr["EAN Componente"])
+                                _q = float(_dr["Cantidad"])
+                                _vi = barcode_lookup.get(_v, {})
+                                _ci = barcode_lookup.get(_c, {})
+                                _vl = " | ".join(x for x in [
+                                    str(_vi.get("Referencia interna", "")).strip(),
+                                    str(_vi.get("Nombre", _v)).strip(),
+                                    str(_vi.get("Color", "")).strip(),
+                                    str(_vi.get("Talla", "")).strip(),
+                                ] if x and x != "nan") or _v
+                                _cl = " | ".join(x for x in [
+                                    str(_ci.get("Referencia interna", "")).strip(),
+                                    str(_ci.get("Nombre", _c)).strip(),
+                                    str(_ci.get("Color", "")).strip(),
+                                    str(_ci.get("Talla", "")).strip(),
+                                ] if x and x != "nan") or _c
+                                _draft_entries.append({
+                                    "Cod Barras Variante": _v,
+                                    "EAN Componente": _c,
+                                    "Cantidad": _q,
+                                    "_nombre_variante": _vl,
+                                    "_nombre_componente": _cl,
+                                })
+                            st.session_state["bom_draft"] = _draft_entries
+                            # Initialise qty_* keys at 0 for all recognised variants
+                            for _bc in _bom_eans:
+                                if barcode_lookup.get(_bc):
+                                    st.session_state.setdefault(f"qty_{_bc}", 0)
+                            st.success(
+                                f"Lista de materiales cargada: {len(_bom_imp)} líneas, "
+                                f"{_n_ok_b} prendas. Introduce las unidades a producir "
+                                "en la rejilla y pulsa **Calcular consumos**."
+                            )
+                            st.rerun()
+
+                else:
+                    # ── Production plan file ──────────────────────────────────
+                    _bc_col_imp = next(
+                        (c for c in _df_imp.columns
+                         if any(k in c.lower() for k in ("barras", "ean", "barcode", "código", "codigo"))),
+                        _df_imp.columns[0],
                     )
-                    st.dataframe(
-                        _prev_df.drop(columns=["_ok"]),
-                        hide_index=True,
-                        use_container_width=True,
-                        height=min(300, 36 + len(_prev_df) * 35),
+                    _qty_col_imp = next(
+                        (c for c in _df_imp.columns
+                         if any(k in c.lower() for k in ("unidad", "cantidad", "qty", "units"))),
+                        _df_imp.columns[1] if len(_df_imp.columns) > 1 else _df_imp.columns[0],
                     )
 
-                    _active_bom_check = st.session_state.get("custom_bom", bom)
-                    if _active_bom_check.empty:
-                        st.warning(
-                            "No hay BOM cargada. El plan se importará pero el cálculo de "
-                            "consumos no producirá resultados hasta que cargues una BOM en "
-                            "la pestaña **Crear / Editar BOM**."
+                    _prev_rows = []
+                    for _, _imp_row in _df_imp.iterrows():
+                        _bc = str(_imp_row[_bc_col_imp]).strip()
+                        try:
+                            _qty = int(float(str(_imp_row[_qty_col_imp]).strip()))
+                        except (ValueError, KeyError):
+                            continue
+                        if not _bc or _bc.lower() in ("nan", "none", ""):
+                            continue
+                        _info = barcode_lookup.get(_bc, {})
+                        _found = bool(_info)
+                        _prev_rows.append({
+                            "Estado": "✓" if _found else "✗ no encontrado",
+                            "Código de barras": _bc,
+                            "Nombre": _info.get("Nombre", "—"),
+                            "Color": _info.get("Color", "—"),
+                            "Talla": _info.get("Talla", "—"),
+                            "Unidades": _qty,
+                            "_ok": _found and _qty > 0,
+                        })
+
+                    if _prev_rows:
+                        _prev_df = pd.DataFrame(_prev_rows)
+                        _n_ok = _prev_df["_ok"].sum()
+                        _n_skip = len(_prev_df) - _n_ok
+                        st.caption(
+                            f"**{_n_ok}** variantes reconocidas"
+                            + (f" · {_n_skip} no encontradas en el catálogo (se ignorarán)" if _n_skip else "")
+                        )
+                        st.dataframe(
+                            _prev_df.drop(columns=["_ok"]),
+                            hide_index=True,
+                            use_container_width=True,
+                            height=min(300, 36 + len(_prev_df) * 35),
                         )
 
-                    if _n_ok > 0 and st.button(
-                        "Importar plan",
-                        key="btn_import_plan",
-                        type="primary",
-                        use_container_width=True,
-                    ):
-                        for _, _r in _prev_df[_prev_df["_ok"]].iterrows():
-                            st.session_state[f"qty_{_r['Código de barras']}"] = int(_r["Unidades"])
-                        st.rerun()
-                else:
-                    st.warning("No se encontraron filas válidas en el fichero.")
+                        _active_bom_check = st.session_state.get("custom_bom", bom)
+                        if _active_bom_check.empty:
+                            st.warning(
+                                "No hay lista de materiales cargada. El plan se importará pero "
+                                "el cálculo de consumos no producirá resultados hasta que "
+                                "cargues la lista de materiales."
+                            )
+
+                        if _n_ok > 0 and st.button(
+                            "Importar plan",
+                            key="btn_import_plan",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            for _, _r in _prev_df[_prev_df["_ok"]].iterrows():
+                                st.session_state[f"qty_{_r['Código de barras']}"] = int(_r["Unidades"])
+                            st.rerun()
+                    else:
+                        st.warning("No se encontraron filas válidas en el fichero.")
 
             except Exception as _e:
                 st.error(f"Error al leer el fichero: {_e}")
