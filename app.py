@@ -785,36 +785,84 @@ with tab1:
             label_visibility="collapsed",
         )
         if up_plan is not None:
-            if st.button("Cargar plan", key="btn_import_plan", use_container_width=True):
-                try:
-                    if up_plan.name.lower().endswith(".csv"):
-                        _df_imp = pd.read_csv(up_plan, dtype=str)
-                    else:
-                        _df_imp = pd.read_excel(up_plan, dtype=str)
-                    _bc_col = next(
-                        (c for c in _df_imp.columns
-                         if any(k in c.lower() for k in ("barras", "ean", "barcode", "código"))),
-                        _df_imp.columns[0],
+            # Parse immediately to show preview
+            try:
+                if up_plan.name.lower().endswith(".csv"):
+                    _df_imp = pd.read_csv(up_plan, dtype=str)
+                else:
+                    _df_imp = pd.read_excel(up_plan, dtype=str)
+
+                _bc_col_imp = next(
+                    (c for c in _df_imp.columns
+                     if any(k in c.lower() for k in ("barras", "ean", "barcode", "código", "codigo"))),
+                    _df_imp.columns[0],
+                )
+                _qty_col_imp = next(
+                    (c for c in _df_imp.columns
+                     if any(k in c.lower() for k in ("unidad", "cantidad", "qty", "units"))),
+                    _df_imp.columns[1] if len(_df_imp.columns) > 1 else _df_imp.columns[0],
+                )
+
+                # Build preview rows
+                _prev_rows = []
+                for _, _imp_row in _df_imp.iterrows():
+                    _bc = str(_imp_row[_bc_col_imp]).strip()
+                    try:
+                        _qty = int(float(str(_imp_row[_qty_col_imp]).strip()))
+                    except (ValueError, KeyError):
+                        continue
+                    if not _bc or _bc.lower() in ("nan", "none", ""):
+                        continue
+                    _info = barcode_lookup.get(_bc, {})
+                    _found = bool(_info)
+                    _prev_rows.append({
+                        "Estado": "✓" if _found else "✗ no encontrado",
+                        "Código de barras": _bc,
+                        "Nombre": _info.get("Nombre", "—"),
+                        "Color": _info.get("Color", "—"),
+                        "Talla": _info.get("Talla", "—"),
+                        "Unidades": _qty,
+                        "_ok": _found and _qty > 0,
+                    })
+
+                if _prev_rows:
+                    _prev_df = pd.DataFrame(_prev_rows)
+                    _n_ok = _prev_df["_ok"].sum()
+                    _n_skip = len(_prev_df) - _n_ok
+                    st.caption(
+                        f"**{_n_ok}** variantes reconocidas"
+                        + (f" · {_n_skip} no encontradas en el catálogo (se ignorarán)" if _n_skip else "")
                     )
-                    _qty_col = next(
-                        (c for c in _df_imp.columns
-                         if any(k in c.lower() for k in ("unidad", "cantidad", "qty", "units"))),
-                        _df_imp.columns[1],
+                    st.dataframe(
+                        _prev_df.drop(columns=["_ok"]),
+                        hide_index=True,
+                        use_container_width=True,
+                        height=min(300, 36 + len(_prev_df) * 35),
                     )
-                    _loaded = 0
-                    for _, _imp_row in _df_imp.iterrows():
-                        _bc = str(_imp_row[_bc_col]).strip()
-                        try:
-                            _qty = int(float(str(_imp_row[_qty_col]).strip()))
-                        except ValueError:
-                            continue
-                        if _qty > 0 and _bc in barcode_lookup:
-                            st.session_state[f"qty_{_bc}"] = _qty
-                            _loaded += 1
-                    st.success(f"{_loaded} variantes cargadas desde el fichero.")
-                    st.rerun()
-                except Exception as _e:
-                    st.error(f"Error al leer el fichero: {_e}")
+
+                    _active_bom_check = st.session_state.get("custom_bom", bom)
+                    if _active_bom_check.empty:
+                        st.warning(
+                            "No hay BOM cargada. El plan se importará pero el cálculo de "
+                            "consumos no producirá resultados hasta que cargues una BOM en "
+                            "la pestaña **Crear / Editar BOM**."
+                        )
+
+                    if _n_ok > 0 and st.button(
+                        "Importar y calcular consumos",
+                        key="btn_import_plan",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        for _, _r in _prev_df[_prev_df["_ok"]].iterrows():
+                            st.session_state[f"qty_{_r['Código de barras']}"] = int(_r["Unidades"])
+                        st.session_state["_auto_calcular"] = True
+                        st.rerun()
+                else:
+                    st.warning("No se encontraron filas válidas en el fichero.")
+
+            except Exception as _e:
+                st.error(f"Error al leer el fichero: {_e}")
 
     # ── Import plan with AI ───────────────────────────────────────────────────
     with st.expander("Importar plan con IA (Excel, CSV o PDF)", expanded=False):
@@ -1152,7 +1200,10 @@ DOCUMENTO A ANALIZAR:
                 st.session_state.pop(_k, None)
             st.rerun()
 
-    if _calcular:
+    # Consume the auto-calculate flag set by the importer
+    _auto_calcular = st.session_state.pop("_auto_calcular", False)
+
+    if _calcular or _auto_calcular:
         final_qtys = {
             k[4:]: int(v)
             for k, v in st.session_state.items()
