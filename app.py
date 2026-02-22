@@ -9,16 +9,55 @@ from pathlib import Path
 import groq as _groq_module
 from groq import Groq
 import pdfplumber
+import gspread
+from google.oauth2.service_account import Credentials
 
-# File used to persist the BOM draft across browser sessions
+# Local files used as fallback when Google Sheets is not configured
 BOM_SESSION_FILE = Path(__file__).parent / "bom_session.json"
-
-# File used to persist custom catalog additions
 EXTRAS_FILE = Path(__file__).parent / "variantes_extras.json"
+
+# Google Sheets tab names
+_GSHEET_EXTRAS_TAB = "variantes_extras"
+_GSHEET_BOM_TAB = "bom_draft"
+_EXTRAS_COLS = [
+    "Nombre", "Referencia interna", "Color", "Talla",
+    "Código de barras principal", "_es_prenda",
+]
+_GSHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+
+@st.cache_resource
+def _get_gsheet():
+    """Return the Google Spreadsheet object, cached across reruns.
+
+    Returns None when credentials or sheet ID are not configured so that
+    all callers can fall back to local-file persistence gracefully.
+    """
+    try:
+        creds_info = dict(st.secrets["gcp_service_account"])
+        sheet_id = st.secrets["GSHEET_ID"]
+        creds = Credentials.from_service_account_info(creds_info, scopes=_GSHEET_SCOPES)
+        gc = gspread.authorize(creds)
+        return gc.open_by_key(sheet_id)
+    except Exception:
+        return None
 
 
 def _load_extras() -> list:
-    """Return the list of custom variant entries from disk."""
+    """Return the list of custom variant entries (Google Sheets, then local file)."""
+    sh = _get_gsheet()
+    if sh is not None:
+        try:
+            ws = sh.worksheet(_GSHEET_EXTRAS_TAB)
+            records = ws.get_all_records()
+            for r in records:
+                r["_es_prenda"] = str(r.get("_es_prenda", "False")).strip().lower() in (
+                    "true", "1", "yes",
+                )
+            return records
+        except Exception:
+            pass
+    # Fallback: local file
     if EXTRAS_FILE.exists():
         try:
             return json.loads(EXTRAS_FILE.read_text("utf-8"))
@@ -28,6 +67,20 @@ def _load_extras() -> list:
 
 
 def _save_extras(entries: list):
+    """Persist custom variant entries (Google Sheets, then local file)."""
+    sh = _get_gsheet()
+    if sh is not None:
+        try:
+            ws = sh.worksheet(_GSHEET_EXTRAS_TAB)
+            ws.clear()
+            rows = [_EXTRAS_COLS]
+            for e in entries:
+                rows.append([str(e.get(c, "")) for c in _EXTRAS_COLS])
+            ws.update("A1", rows)
+            return
+        except Exception:
+            pass
+    # Fallback: local file
     EXTRAS_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -47,7 +100,7 @@ def _delete_extra_variant(barcode: str):
 
 
 def _save_bom_draft():
-    """Write bom_draft to disk only when it has changed since last save."""
+    """Persist bom_draft only when it has changed (Google Sheets, then local file)."""
     try:
         data = [
             {**e, "Cantidad": float(e["Cantidad"])}
@@ -56,10 +109,15 @@ def _save_bom_draft():
         _serialised = json.dumps(data, ensure_ascii=False, sort_keys=True)
         _new_hash = hash(_serialised)
         if st.session_state.get("_bom_draft_saved_hash") == _new_hash:
-            return  # nothing changed — skip disk write
-        BOM_SESSION_FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+            return  # nothing changed — skip write
+        sh = _get_gsheet()
+        if sh is not None:
+            ws = sh.worksheet(_GSHEET_BOM_TAB)
+            ws.update("A1", [[_serialised]])
+        else:
+            BOM_SESSION_FILE.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         st.session_state["_bom_draft_saved_hash"] = _new_hash
     except Exception:
         pass
@@ -1734,32 +1792,50 @@ with tab2:
         "Una vez completa, actívala para usarla en el cálculo de consumos."
     )
 
-    # Initialize BOM draft — load from disk if first run of this session
+    # Initialize BOM draft — load from persistent storage on first run of this session
     if "bom_draft" not in st.session_state:
-        if BOM_SESSION_FILE.exists():
+        _bom_loaded = False
+        # Try Google Sheets first
+        _sh = _get_gsheet()
+        if _sh is not None:
             try:
-                st.session_state["bom_draft"] = json.loads(
-                    BOM_SESSION_FILE.read_text("utf-8")
-                )
-                if st.session_state["bom_draft"]:
-                    # Also rebuild custom_bom so calculations work immediately
-                    st.session_state["custom_bom"] = pd.DataFrame([
-                        {
-                            "Cod Barras Variante": e["Cod Barras Variante"],
-                            "EAN Componente": e["EAN Componente"],
-                            "Cantidad": float(e["Cantidad"]),
-                        }
-                        for e in st.session_state["bom_draft"]
-                    ])
-                    st.info(
-                        f"Se ha restaurado la BOM de la sesión anterior "
-                        f"({len(st.session_state['bom_draft'])} entradas).",
-                        icon="💾",
-                    )
+                _ws = _sh.worksheet(_GSHEET_BOM_TAB)
+                _val = _ws.acell("A1").value
+                if _val:
+                    st.session_state["bom_draft"] = json.loads(_val)
+                    _bom_loaded = True
+                else:
+                    st.session_state["bom_draft"] = []
+                    _bom_loaded = True
             except Exception:
-                st.session_state["bom_draft"] = []
-        else:
+                pass
+        # Fallback: local file
+        if not _bom_loaded:
+            if BOM_SESSION_FILE.exists():
+                try:
+                    st.session_state["bom_draft"] = json.loads(
+                        BOM_SESSION_FILE.read_text("utf-8")
+                    )
+                    _bom_loaded = True
+                except Exception:
+                    pass
+        if not _bom_loaded:
             st.session_state["bom_draft"] = []
+        if st.session_state.get("bom_draft"):
+            # Rebuild custom_bom so calculations work immediately
+            st.session_state["custom_bom"] = pd.DataFrame([
+                {
+                    "Cod Barras Variante": e["Cod Barras Variante"],
+                    "EAN Componente": e["EAN Componente"],
+                    "Cantidad": float(e["Cantidad"]),
+                }
+                for e in st.session_state["bom_draft"]
+            ])
+            st.info(
+                f"Se ha restaurado la BOM de la sesión anterior "
+                f"({len(st.session_state['bom_draft'])} entradas).",
+                icon="💾",
+            )
 
     # ── Build variant option lists ────────────────────────────────────────────
     all_variants = variantes.dropna(subset=["Código de barras principal"]).copy()

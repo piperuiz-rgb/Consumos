@@ -3,3 +3,5 @@ pandas
 openpyxl
 groq
 pdfplumber
+gspread
+google-auth
